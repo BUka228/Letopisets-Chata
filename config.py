@@ -1,6 +1,6 @@
 # config.py
 import logging
-import logging.handlers # <-- Убедитесь, что этот импорт есть
+import logging.handlers
 import os
 import pytz
 from dotenv import load_dotenv
@@ -19,22 +19,20 @@ SCHEDULE_HOUR = int(os.getenv("SCHEDULE_HOUR", "0"))
 SCHEDULE_MINUTE = int(os.getenv("SCHEDULE_MINUTE", "5"))
 
 # --- Настройки данных ---
-# Определяем директорию для данных
 if os.getenv('RENDER') == 'true':
-    DATA_DIR = "/data" # Путь монтирования диска на Render
+    DATA_DIR = "/data"
 else:
-    # Для локального запуска создаем директорию data, если ее нет
     DATA_DIR = "data"
+    # Локально создаем директорию, если нужно
     if not os.path.exists(DATA_DIR):
          try:
               os.makedirs(DATA_DIR)
-              print(f"Локальная директория '{DATA_DIR}' создана.")
+              print(f"INFO: Локальная директория '{DATA_DIR}' создана.")
          except OSError as e:
-              print(f"Не удалось создать локальную директорию '{DATA_DIR}': {e}")
+              print(f"ERROR: Не удалось создать локальную директорию '{DATA_DIR}': {e}")
 
-
-DATA_FILE = os.path.join(DATA_DIR, "bot_data.db") # Полный путь к файлу БД
-LOG_FILE = os.path.join(DATA_DIR, "bot.log") # Полный путь к лог-файлу
+DATA_FILE = os.path.join(DATA_DIR, "bot_data.db")
+LOG_FILE = os.path.join(DATA_DIR, "bot.log")
 
 # --- Настройки Gemini ---
 GEMINI_MODEL_NAME = "gemini-1.5-flash-latest"
@@ -54,49 +52,53 @@ MESSAGE_FILTERS = (
 
 # --- Функции инициализации ---
 def setup_logging():
-    """Настраивает логирование в консоль и в файл на диске."""
     log_formatter = logging.Formatter(LOG_FORMAT)
     logger = logging.getLogger()
     logger.setLevel(LOG_LEVEL)
 
-    # Очищаем существующие обработчики, если они есть (на случай повторного вызова)
-    # for handler in logger.handlers[:]:
-    #    logger.removeHandler(handler)
+    # Очищаем существующие обработчики (на случай перезапуска)
+    for handler in logger.handlers[:]:
+       logger.removeHandler(handler)
 
-    # Обработчик для вывода в консоль (stdout/stderr)
+    # Обработчик для консоли
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(log_formatter)
     logger.addHandler(stream_handler)
 
-    # Обработчик для записи в файл с ротацией
+    # --- ИЗМЕНЕНИЕ: Устойчивая настройка файлового логгера ---
     try:
-        # --- УДАЛЕНО: Строка os.makedirs(DATA_DIR, exist_ok=True) ---
-        # Директория /data уже существует на Render
-        # Локально мы создали 'data' выше, если ее не было
+        # Проверяем, существует ли директория ПЕРЕД созданием хендлера
+        # Хотя Render должен ее создать, эта проверка не помешает
+        if not os.path.exists(DATA_DIR):
+             # Попытка создать еще раз на всякий случай
+             os.makedirs(DATA_DIR, exist_ok=True)
+             print(f"INFO: Директория '{DATA_DIR}' проверена/создана для логов.")
 
         # Создаем файл логов (или открываем существующий)
-        # RotatingFileHandler сам создаст файл, если его нет, но директория ДОЛЖНА существовать
         file_handler = logging.handlers.RotatingFileHandler(
             LOG_FILE, maxBytes=5*1024*1024, backupCount=5, encoding='utf-8'
         )
         file_handler.setFormatter(log_formatter)
         logger.addHandler(file_handler)
-        # Используем print здесь, т.к. логгер может еще не быть полностью настроен
         print(f"INFO: Логирование в файл настроено: {LOG_FILE}")
-    except Exception as e:
+    except (OSError, FileNotFoundError, PermissionError) as e:
         # Логируем ошибку в консоль, если настройка файла не удалась
-        logging.error(f"Ошибка настройки логирования в файл {LOG_FILE}: {e}", exc_info=True)
+        # Используем print, т.к. стандартный логгер может быть не готов
+        print(f"ERROR: Ошибка настройки логирования в файл {LOG_FILE}: {e.__class__.__name__}: {e}. Логирование будет только в консоль.")
+    except Exception as e:
+         print(f"ERROR: Неожиданная ошибка настройки логирования в файл: {e.__class__.__name__}: {e}. Логирование будет только в консоль.")
 
     # Уменьшаем шум от библиотек
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.INFO)
     logging.getLogger("google").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.INFO) # Часто шумит
+    logging.getLogger("urllib3").setLevel(logging.INFO)
 
 def get_schedule_timezone():
     try:
         return pytz.timezone(SCHEDULE_TIMEZONE_STR)
     except pytz.exceptions.UnknownTimeZoneError:
+        # Используем logging здесь, т.к. он уже должен быть настроен (хотя бы на консоль)
         logging.error(f"Неизвестный часовой пояс '{SCHEDULE_TIMEZONE_STR}'. Используется UTC.")
         return pytz.utc
 
@@ -108,7 +110,5 @@ def validate_config():
     logging.info("Конфигурация успешно загружена и проверена.")
 
 # --- Вызов инициализации при импорте ---
-# print("DEBUG: Начало инициализации config.py") # Для отладки
-setup_logging() # Настраиваем логирование
+setup_logging()
 SCHEDULE_TIMEZONE = get_schedule_timezone()
-# print("DEBUG: Конец инициализации config.py")
