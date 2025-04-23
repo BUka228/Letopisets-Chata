@@ -1,25 +1,10 @@
-python-telegram-bot==22.0
-google-generativeai==0.8.5
-python-dotenv==1.1.0
-pytz==2025.2
+# Основные зависимости бота
+python-telegram-bot[job-queue]>=21.0,<22.0  # Важно указать совместимую версию, например v21.x
+python-dotenv>=1.0.0                     # Для локального запуска
+pytz>=2024.1                             # Для работы с часовыми поясами
+google-generativeai>=0.5.0,<0.9.0         # Укажите вашу версию, но лучше ограничить
+psycopg2-binary>=2.9.9                   # Для PostgreSQL на Heroku
 
-
-google-api-core >= 2.24.2
-google-auth >= 2.14.1
-googleapis-common-protos >= 1.56.0
-proto-plus >= 1.22.3
-protobuf >= 3.19.5 # Важно для Google API
-grpcio >= 1.56.0
-cachetools >= 4.2.2 # Зависимость google-auth
-pyasn1-modules >= 0.2.1 # Зависимость google-auth
-pyasn1 >= 0.4.6 # Зависимость google-auth
-rsa >= 3.1.4 # Зависимость google-auth
-httpx >= 0.24.1 # Используется PTB и Google
-httpcore >= 0.17.3 # Зависимость httpx
-certifi >= 2022.12.7 # Для SSL сертификатов
-charset-normalizer >= 2.0.0 # Зависимость requests/httpx?
-idna >= 2.0 # Зависимость requests/httpx?
-urllib3 >= 1.26 # Часто используется для HTTP
-
-# Можно добавить typing_extensions, т.к. часто используется
-typing_extensions >= 4.0.0
+# Неявные, но часто полезные / зависимости зависимостей
+requests>=2.31.0
+urllib3>=2.0.0
