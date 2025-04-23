@@ -1,1 +1,53 @@
-/.env
+# --- Python ---
+# Виртуальные окружения
+/venv/
+/.venv/
+env/
+.env
+
+# Байт-код и кеш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+$py.class
+
+# --- База данных SQLite ---
+# Основной файл базы данных
+bot_data.db
+# Временные файлы SQLite (особенно при WAL mode)
+bot_data.db-shm
+bot_data.db-wal
+*.db-journal # Старый формат журнала
+
+# --- Старые файлы данных (если еще есть) ---
+daily_messages.pkl
+
+# --- Логи ---
+*.log
+logs/
+*.log.*
+
+# --- Файлы IDE/Редакторов ---
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sublime-workspace
+
+# --- Файлы операционной системы ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# --- Файлы зависимостей/сборки (если используются) ---
+dist/
+build/
+*.egg-info/
+downloads/
+*.egg
+
+# --- Другое ---
+# Можно добавить специфичные для вас файлы/папки
