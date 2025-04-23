@@ -3,7 +3,7 @@ import logging
 import sqlite3
 import threading
 import time
-import datetime
+
 from typing import List, Dict, Any, Optional, Tuple
 
 # Импортируем путь к файлу БД и языки из конфига

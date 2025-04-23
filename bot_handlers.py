@@ -33,16 +33,26 @@ last_job_error: Optional[str] = None # Можно обновлять в конц
 
 # --- Вспомогательная функция для проверки прав администратора ---
 async def is_user_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Проверяет, является ли пользователь администратором чата."""
+    """Проверяет, является ли пользователь администратором или создателем чата."""
     if chat_id > 0: # В личных чатах пользователь всегда "админ"
         return True
+    if not context.bot: # Проверка на случай, если бот недоступен
+        logger.error(f"Объект бота недоступен при проверке админа {user_id} в чате {chat_id}")
+        return False
     try:
         chat_member = await context.bot.get_chat_member(chat_id, user_id)
-        # Является админом или создателем
-        return chat_member.status in [tg_constants.ChatMemberStatus.ADMINISTRATOR, tg_constants.ChatMemberStatus.CREATOR]
+        # --- ИЗМЕНЕНО ЗДЕСЬ: Используем OWNER вместо CREATOR ---
+        return chat_member.status in [
+            tg_constants.ChatMemberStatus.ADMINISTRATOR,
+            tg_constants.ChatMemberStatus.OWNER # <-- Правильный статус для создателя
+        ]
+        # ------------------------------------------------------
     except TelegramError as e:
-        logger.error(f"Не удалось получить статус участника {user_id} в чате {chat_id}: {e}")
-        # В случае ошибки считаем, что не админ, для безопасности
+        # Логируем частые ошибки доступа
+        if "chat not found" in str(e).lower() or "user not found" in str(e).lower():
+            logger.warning(f"Не удалось получить статус участника {user_id} в чате {chat_id}: {e}")
+        else:
+            logger.error(f"Ошибка Telegram при проверке админа {user_id} в чате {chat_id}: {e}")
         return False
     except Exception as e:
          logger.error(f"Неожиданная ошибка при проверке админа {user_id} в чате {chat_id}: {e}", exc_info=True)
@@ -175,45 +185,51 @@ async def generate_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def regenerate_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Повторно генерирует историю за сегодня (если сообщения еще не удалены)."""
-    user = update.effective_user; chat = update.effective_chat
+    user = update.effective_user; chat = update.effective_chat;
     if not user or not chat: return
-    chat_lang = await get_chat_lang(chat.id)
-    logger.info(f"User {user.username} requested /regenerate_story for chat {chat.id}")
-    messages_current = dm.get_messages_for_chat(chat.id) # Получаем сообщения (они не должны быть удалены)
-    if not messages_current:
-        await update.message.reply_text(get_text("regenerate_no_data", chat_lang))
-        return
+    chat_lang = await get_chat_lang(chat.id); logger.info(f"User {user.username} requested /regenerate_story for chat {chat.id}")
+    messages_current = dm.get_messages_for_chat(chat.id)
+    if not messages_current: await update.message.reply_text(get_text("regenerate_no_data", chat_lang)); return
 
-    # Повторяем логику generate_now
+    # --- Определение photo_count и photo_process_limit ЗДЕСЬ ---
     photo_count = sum(1 for m in messages_current if m.get('type') == 'photo')
     photo_process_limit = min(photo_count, MAX_PHOTOS_TO_ANALYZE)
-    photo_info_str = get_text("photo_info_text", chat_lang, count=photo_process_limit) if photo_count > 0 else ""
+    # ----------------------------------------------------------
+
     msg = await update.message.reply_text(get_text("regenerating", chat_lang))
 
     try:
+        # --- Сначала скачиваем изображения ---
         downloaded_images = await download_images(context, messages_current, chat.id, MAX_PHOTOS_TO_ANALYZE)
+
+        # --- ИЗМЕНЕНО: Определяем photo_note_str ПОСЛЕ скачивания ---
+        photo_note_str = get_text("photo_info_text", chat_lang, count=photo_process_limit) if downloaded_images else ""
+        # -------------------------------------------------------------
+
         prepared_content = gc.prepare_story_parts(messages_current, downloaded_images)
         story, error_msg = await gc.safe_generate_story(prepared_content)
         if story:
-            # Отправляем как новое сообщение, не редактируем старое
-            header_key = "story_ready_header" # Используем тот же заголовок
+            header_key = "story_ready_header"
+            # Теперь photo_note_str определена корректно
             final_message_header = get_text(header_key, chat_lang, photo_info=photo_note_str)
-            # Добавляем кнопки фидбэка к новому сообщению
-            new_msg = await update.message.reply_text(final_message_header + story) # Отправляем
+            new_msg = await update.message.reply_text(final_message_header + story)
             keyboard = InlineKeyboardMarkup([[ InlineKeyboardButton("👍", callback_data=f"feedback_good_{new_msg.message_id}"), InlineKeyboardButton("👎", callback_data=f"feedback_bad_{new_msg.message_id}") ]])
-            await context.bot.edit_message_reply_markup(chat_id=chat.id, message_id=new_msg.message_id, reply_markup=keyboard) # Добавляем кнопки
-            await msg.delete() # Удаляем сообщение "Пересоздаю..."
+            try: await context.bot.edit_message_reply_markup(chat_id=chat.id, message_id=new_msg.message_id, reply_markup=keyboard)
+            except BadRequest: pass
+            except TelegramError as e: logger.warning(f"Error updating reply markup in regenerate: {e}")
+
+            try: await msg.delete()
+            except Exception as e: logger.warning(f"Could not delete 'regenerating' message: {e}")
+
             if error_msg: await context.bot.send_message(chat_id=chat.id, text=get_text("proxy_note", chat_lang, note=error_msg))
-        else:
-            await msg.edit_text(get_text("generation_failed", chat_lang, error=error_msg or 'Unknown'))
-    except Exception as e:
-         logger.error(f"Error in /regenerate_story for chat {chat.id}: {e}", exc_info=True)
-         await msg.edit_text(get_text("error_db_generic", chat_lang))
+        else: await msg.edit_text(get_text("generation_failed", chat_lang, error=error_msg or 'Unknown'))
+    except Exception as e: logger.error(f"Error in /regenerate_story chat {chat.id}: {e}", exc_info=True); await msg.edit_text(get_text("error_db_generic", chat_lang))
 
 async def story_on_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Включает или выключает ежедневную генерацию (только админы)."""
     user = update.effective_user; chat = update.effective_chat
-    if not user or not chat or chat.type == tg_constants.ChatType.PRIVATE: return # Команда не для ЛС
+    if not user or not chat or not update.message or not update.message.text \
+       or chat.type == tg_constants.ChatType.PRIVATE: return # Добавили проверки сообщения
     chat_lang = await get_chat_lang(chat.id)
 
     is_admin = await is_user_admin(chat.id, user.id, context)
@@ -221,10 +237,24 @@ async def story_on_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(get_text("admin_only", chat_lang))
         return
 
-    command = update.message.text.split()[0].lower() # /story_on или /story_off
+    # --- ИЗМЕНЕНО: Извлекаем чистую команду ---
+    # Получаем текст сообщения
+    message_text = update.message.text
+    # Разбиваем по '@' и берем первую часть (саму команду)
+    command_part = message_text.split('@')[0]
+    # Разбиваем по пробелу (на случай, если есть аргументы) и берем первую часть
+    command = command_part.split()[0].lower()
+    # -----------------------------------------
+
+    # Определяем статус на основе чистой команды
     new_status = (command == "/story_on")
 
+    logger.info(f"Получен текст '{message_text}'. Извлечена команда '{command}'. Определен new_status = {new_status} (тип: {type(new_status)})")
+
+    # Вызываем обновление в БД
     dm.update_chat_setting(chat.id, 'enabled', new_status)
+
+    # Отправляем ответ пользователю
     reply_text = get_text("story_enabled", chat_lang) if new_status else get_text("story_disabled", chat_lang)
     await update.message.reply_text(reply_text)
 
