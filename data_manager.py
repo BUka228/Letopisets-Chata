@@ -1,68 +1,90 @@
 # data_manager.py
 import logging
-import os
-import psycopg2 # Используем psycopg2
-from psycopg2 import sql # Для безопасного формирования SQL запросов
-from psycopg2.extras import DictCursor # Для получения строк как словарей
-import urllib.parse as urlparse # Для парсинга DATABASE_URL
+import sqlite3
+import threading
+import time # Для повторных попыток подключения
 from typing import List, Dict, Any, Optional
-import asyncio # Для run_in_executor
 
-# Импортируем DATABASE_URL из конфига
-from config import DATABASE_URL
+from config import DATA_FILE # Импортируем путь к файлу БД из конфига
 
 logger = logging.getLogger(__name__)
 
-# --- Парсинг DATABASE_URL ---
-_db_params = None
-if DATABASE_URL:
-    try:
-        url = urlparse.urlparse(DATABASE_URL)
-        _db_params = {
-            'database': url.path[1:],
-            'user': url.username,
-            'password': url.password,
-            'host': url.hostname,
-            'port': url.port
-        }
-        logger.info("Параметры подключения к PostgreSQL успешно извлечены.")
-    except Exception as e:
-        logger.critical(f"Ошибка парсинга DATABASE_URL: {e}", exc_info=True)
-        _db_params = None
-else:
-    logger.warning("DATABASE_URL не задан.")
+# Thread-local storage для соединений
+local_storage = threading.local()
 
-# --- Функции для работы с БД (блокирующие) ---
-# Эти функции будут вызываться через run_in_executor
+def _get_db_connection() -> sqlite3.Connection:
+    """Получает или создает соединение с БД SQLite для текущего потока."""
+    if not hasattr(local_storage, 'connection') or local_storage.connection is None:
+        retry_count = 0
+        max_retries = 3
+        while retry_count < max_retries:
+            try:
+                logger.debug(f"Попытка {retry_count+1}/{max_retries} создания SQLite соединения для потока {threading.current_thread().name} к файлу '{DATA_FILE}'...")
+                # check_same_thread=False нужно для работы с asyncio/многопоточностью
+                conn = sqlite3.connect(DATA_FILE, timeout=15, check_same_thread=False) # Увеличим таймаут
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA busy_timeout = 5000;") # Ждать 5 сек при блокировке
+                conn.row_factory = sqlite3.Row
+                local_storage.connection = conn
+                logger.debug(f"SQLite соединение успешно создано для потока {threading.current_thread().name}")
+                return conn
+            except sqlite3.OperationalError as e:
+                # 'database is locked' - частая ошибка при WAL mode и высокой нагрузке
+                if "database is locked" in str(e) and retry_count < max_retries - 1:
+                    retry_count += 1
+                    wait_time = (retry_count ** 2) * 0.1 # Экспоненциальная задержка
+                    logger.warning(f"База данных '{DATA_FILE}' заблокирована, повторная попытка через {wait_time:.2f} сек...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.critical(f"Не удалось подключиться к базе данных SQLite '{DATA_FILE}' после {max_retries} попыток: {e}", exc_info=True)
+                    raise
+            except sqlite3.Error as e:
+                logger.critical(f"Непредвиденная ошибка SQLite при подключении к '{DATA_FILE}': {e}", exc_info=True)
+                raise
+    return local_storage.connection
 
-def _get_db_connection_sync():
-    """Создает и возвращает НОВОЕ блокирующее соединение psycopg2."""
-    if not _db_params:
-        raise ConnectionError("Параметры подключения к БД не инициализированы.")
-    try:
-        conn = psycopg2.connect(**_db_params)
-        logger.debug("Новое соединение PostgreSQL установлено.")
-        return conn
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка подключения к PostgreSQL: {e}", exc_info=True)
-        raise # Передаем исключение дальше
+def close_db_connection():
+    """Закрывает соединение с БД для текущего потока/задачи."""
+    if hasattr(local_storage, 'connection') and local_storage.connection is not None:
+        logger.debug(f"Закрытие SQLite соединения для потока {threading.current_thread().name}")
+        try:
+            local_storage.connection.close()
+        except sqlite3.Error as e:
+             logger.error(f"Ошибка при закрытии SQLite соединения: {e}")
+        finally:
+            local_storage.connection = None
 
-def _init_db_sync():
-    """Инициализирует БД: создает таблицы и индексы (блокирующая версия)."""
-    conn = None
+def _execute_query(sql: str, params: tuple = (), fetch_one: bool = False, fetch_all: bool = False) -> Any:
+    """Вспомогательная функция для выполнения SQL запросов с обработкой ошибок."""
+    conn = None # Инициализируем conn
     try:
-        conn = _get_db_connection_sync()
+        conn = _get_db_connection()
         cursor = conn.cursor()
+        cursor.execute(sql, params)
+        if fetch_one:
+            return cursor.fetchone()
+        if fetch_all:
+            return cursor.fetchall()
+        conn.commit()
+        return cursor.rowcount # Для INSERT/UPDATE/DELETE возвращаем кол-во измененных строк
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка SQLite при выполнении запроса: {sql} с параметрами {params} - {e}", exc_info=True)
+        # Важно: Не закрываем соединение здесь, оно управляется централизованно
+        raise # Передаем исключение дальше, чтобы вызывающая функция знала об ошибке
+    # finally: # Не закрываем соединение здесь
 
-        # Используем BIGSERIAL для автоинкрементного ID в PostgreSQL
-        # Используем TIMESTAMP WITH TIME ZONE для времени
-        cursor.execute("""
+def _init_db():
+    """Инициализирует базу данных: создает таблицы и индексы."""
+    try:
+        logger.info(f"Проверка/создание таблицы 'messages' в '{DATA_FILE}'...")
+        _execute_query("""
             CREATE TABLE IF NOT EXISTS messages (
-                chat_id BIGINT NOT NULL,
-                message_id BIGINT NOT NULL,
-                user_id BIGINT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
                 username TEXT,
-                timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                timestamp TEXT NOT NULL,
                 message_type TEXT NOT NULL,
                 content TEXT,
                 file_id TEXT,
@@ -71,46 +93,42 @@ def _init_db_sync():
                 PRIMARY KEY (chat_id, message_id)
             )
         """)
-        logger.info("Таблица 'messages' проверена/создана в PostgreSQL.")
+        logger.info("Таблица 'messages' готова.")
 
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id_pg ON messages (chat_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_timestamp_pg ON messages (timestamp)")
-        logger.info("Индексы для таблицы 'messages' проверены/созданы в PostgreSQL.")
+        logger.info("Проверка/создание индексов для 'messages'...")
+        _execute_query("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages (chat_id)")
+        _execute_query("CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages (timestamp)")
+        logger.info("Индексы для 'messages' готовы.")
 
-        # Добавьте другие таблицы здесь при необходимости
+        # Можно добавить другие таблицы здесь
+        # logger.info("Проверка/создание таблицы 'chat_settings'...")
+        # _execute_query("""
+        #    CREATE TABLE IF NOT EXISTS chat_settings ( ... )
+        # """)
+        # logger.info("Таблица 'chat_settings' готова.")
 
-        conn.commit()
-        cursor.close()
-        logger.info(f"База данных PostgreSQL успешно инициализирована.")
-    except psycopg2.Error as e:
-        logger.critical(f"Ошибка при инициализации базы данных PostgreSQL: {e}", exc_info=True)
-        if conn:
-            conn.rollback() # Откатываем изменения в случае ошибки
-        raise
-    finally:
-        if conn:
-            conn.close()
-            logger.debug("Соединение PostgreSQL закрыто после инициализации.")
+        logger.info(f"База данных '{DATA_FILE}' успешно инициализирована/проверена.")
+    except Exception as e: # Ловим и другие возможные ошибки _execute_query
+         logger.critical(f"КРИТИЧЕСКАЯ ОШИБКА при инициализации базы данных SQLite: {e}", exc_info=True)
+         raise # Прерываем запуск, т.к. без БД нельзя
 
-def _add_message_sync(chat_id: int, message_data: Dict[str, Any]):
-    """Добавляет или заменяет сообщение в БД (блокирующая версия)."""
-    # Используем INSERT ... ON CONFLICT для аналога INSERT OR REPLACE
+def load_data():
+    """Инициализирует БД при старте."""
+    logger.info("Инициализация хранилища данных (SQLite)...")
+    _init_db()
+
+def add_message(chat_id: int, message_data: Dict[str, Any]):
+    """Добавляет или заменяет сообщение в базе данных."""
+    if not isinstance(message_data, dict):
+        logger.warning(f"Попытка добавить некорректные данные сообщения для чата {chat_id}")
+        return
+
     sql = """
-        INSERT INTO messages (
+        INSERT OR REPLACE INTO messages (
             chat_id, message_id, user_id, username, timestamp,
             message_type, content, file_id, file_unique_id, file_name
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (chat_id, message_id) DO UPDATE SET
-            user_id = EXCLUDED.user_id,
-            username = EXCLUDED.username,
-            timestamp = EXCLUDED.timestamp,
-            message_type = EXCLUDED.message_type,
-            content = EXCLUDED.content,
-            file_id = EXCLUDED.file_id,
-            file_unique_id = EXCLUDED.file_unique_id,
-            file_name = EXCLUDED.file_name;
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
-    # Используем %s как плейсхолдер для psycopg2
     params = (
         chat_id,
         message_data.get('message_id'),
@@ -123,136 +141,56 @@ def _add_message_sync(chat_id: int, message_data: Dict[str, Any]):
         message_data.get('file_unique_id'),
         message_data.get('file_name')
     )
-
-    conn = None
     try:
-        conn = _get_db_connection_sync()
-        cursor = conn.cursor()
-        cursor.execute(sql, params)
-        conn.commit()
-        cursor.close()
-        logger.debug(f"Сообщение (ID: {message_data.get('message_id')}) добавлено/заменено для чата {chat_id} в PostgreSQL.")
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка PostgreSQL при добавлении сообщения для чата {chat_id}: {e}", exc_info=True)
-        if conn: conn.rollback()
-        raise # Чтобы внешний код знал об ошибке
-    finally:
-        if conn: conn.close()
+        _execute_query(sql, params)
+        logger.debug(f"Сообщение (ID: {message_data.get('message_id')}) добавлено/заменено для чата {chat_id}.")
+    except Exception as e:
+        # Ошибка уже залогирована в _execute_query
+        logger.error(f"Не удалось добавить сообщение {message_data.get('message_id')} для чата {chat_id}.")
 
-def _get_messages_for_chat_sync(chat_id: int) -> List[Dict[str, Any]]:
-    """Получает сообщения для чата из БД (блокирующая версия)."""
+def get_messages_for_chat(chat_id: int) -> List[Dict[str, Any]]:
+    """Возвращает список словарей сообщений для чата, отсортированных по времени."""
     messages = []
-    sql = "SELECT * FROM messages WHERE chat_id = %s ORDER BY timestamp ASC"
-    conn = None
+    sql = "SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC"
     try:
-        conn = _get_db_connection_sync()
-        # Используем DictCursor для получения результата в виде словаря
-        cursor = conn.cursor(cursor_factory=DictCursor)
-        cursor.execute(sql, (chat_id,))
-        rows = cursor.fetchall()
-        messages = [dict(row) for row in rows] # Преобразуем в обычные словари
-        cursor.close()
-        logger.debug(f"Извлечено {len(messages)} сообщений для чата {chat_id} из PostgreSQL.")
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка PostgreSQL при получении сообщений для чата {chat_id}: {e}", exc_info=True)
-        # Не бросаем исключение, возвращаем пустой список в случае ошибки чтения
-    finally:
-        if conn: conn.close()
+        rows = _execute_query(sql, (chat_id,), fetch_all=True)
+        if rows:
+            # Преобразуем sqlite3.Row в обычные словари
+            messages = [dict(row) for row in rows]
+            # Переименовываем ключ 'message_type' обратно в 'type' для совместимости
+            for msg in messages:
+                msg['type'] = msg.pop('message_type', None)
+        logger.debug(f"Извлечено {len(messages)} сообщений для чата {chat_id} из БД.")
+    except Exception as e:
+        logger.error(f"Не удалось получить сообщения для чата {chat_id}.")
     return messages
 
-def _clear_messages_for_chat_sync(chat_id: int):
-    """Удаляет сообщения для чата из БД (блокирующая версия)."""
-    sql = "DELETE FROM messages WHERE chat_id = %s"
-    deleted_rows = 0
-    conn = None
+def clear_messages_for_chat(chat_id: int):
+    """Удаляет все сообщения для указанного чата из базы данных."""
+    sql = "DELETE FROM messages WHERE chat_id = ?"
     try:
-        conn = _get_db_connection_sync()
-        cursor = conn.cursor()
-        cursor.execute(sql, (chat_id,))
-        deleted_rows = cursor.rowcount
-        conn.commit()
-        cursor.close()
+        deleted_rows = _execute_query(sql, (chat_id,))
         if deleted_rows > 0:
-            logger.info(f"Удалено {deleted_rows} сообщений для чата {chat_id} из PostgreSQL.")
+            logger.info(f"Удалено {deleted_rows} сообщений для чата {chat_id} из БД.")
         else:
-            logger.debug(f"Нет сообщений для удаления для чата {chat_id} в PostgreSQL.")
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка PostgreSQL при удалении сообщений для чата {chat_id}: {e}", exc_info=True)
-        if conn: conn.rollback()
-        raise
-    finally:
-        if conn: conn.close()
+            logger.debug(f"Нет сообщений для удаления для чата {chat_id} в БД.")
+    except Exception as e:
+        logger.error(f"Не удалось удалить сообщения для чата {chat_id}.")
 
-def _get_all_chat_ids_sync() -> List[int]:
-    """Получает список уникальных chat_id из БД (блокирующая версия)."""
+def get_all_chat_ids() -> List[int]:
+    """Возвращает список уникальных ID чатов из базы."""
     chat_ids = []
     sql = "SELECT DISTINCT chat_id FROM messages"
-    conn = None
     try:
-        conn = _get_db_connection_sync()
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        rows = cursor.fetchall()
-        chat_ids = [row[0] for row in rows] # Получаем первый элемент из кортежа
-        cursor.close()
-        logger.debug(f"Найдено {len(chat_ids)} уникальных chat_id в PostgreSQL.")
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка PostgreSQL при получении списка chat_id: {e}", exc_info=True)
-    finally:
-        if conn: conn.close()
+        rows = _execute_query(sql, fetch_all=True)
+        if rows:
+            chat_ids = [row['chat_id'] for row in rows]
+        logger.debug(f"Найдено {len(chat_ids)} уникальных chat_id в БД.")
+    except Exception as e:
+         logger.error(f"Не удалось получить список chat_id из БД.")
     return chat_ids
 
-
-# --- Асинхронные обертки для вызова блокирующих функций ---
-
-async def run_db_operation(func, *args, **kwargs):
-    """Запускает блокирующую функцию БД в отдельном потоке."""
-    loop = asyncio.get_running_loop()
-    # None в run_in_executor использует ThreadPoolExecutor по умолчанию
-    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
-
-async def load_data():
-    """Асинхронная функция инициализации БД."""
-    logger.info("Инициализация хранилища данных (PostgreSQL)...")
-    try:
-        await run_db_operation(_init_db_sync)
-    except Exception as e:
-         logger.critical(f"Критическая ошибка при асинхронной инициализации PostgreSQL: {e}", exc_info=True)
-         raise # Прерываем запуск бота
-
-async def add_message(chat_id: int, message_data: Dict[str, Any]):
-    """Асинхронно добавляет сообщение в БД."""
-    if not isinstance(message_data, dict):
-         logger.warning(f"Попытка добавить некорректные данные сообщения для чата {chat_id}")
-         return
-    try:
-        await run_db_operation(_add_message_sync, chat_id, message_data)
-    except Exception as e:
-        # Логируем ошибку, но не прерываем работу бота из-за одной ошибки записи
-        logger.error(f"Не удалось асинхронно добавить сообщение для чата {chat_id}: {e}", exc_info=True)
-
-async def get_messages_for_chat(chat_id: int) -> List[Dict[str, Any]]:
-    """Асинхронно получает сообщения для чата."""
-    try:
-        return await run_db_operation(_get_messages_for_chat_sync, chat_id)
-    except Exception as e:
-        logger.error(f"Не удалось асинхронно получить сообщения для чата {chat_id}: {e}", exc_info=True)
-        return [] # Возвращаем пустой список в случае ошибки
-
-async def clear_messages_for_chat(chat_id: int):
-    """Асинхронно удаляет сообщения для чата."""
-    try:
-        await run_db_operation(_clear_messages_for_chat_sync, chat_id)
-    except Exception as e:
-        logger.error(f"Не удалось асинхронно очистить сообщения для чата {chat_id}: {e}", exc_info=True)
-
-async def get_all_chat_ids() -> List[int]:
-    """Асинхронно получает список всех chat_id."""
-    try:
-        return await run_db_operation(_get_all_chat_ids_sync)
-    except Exception as e:
-        logger.error(f"Не удалось асинхронно получить все chat_id: {e}", exc_info=True)
-        return []
-
-# Функция close_all_connections больше не нужна, т.к. соединения
-# открываются и закрываются для каждой операции в _sync функциях.
+def close_all_connections():
+    """Закрывает соединение с БД, если оно было открыто в текущем потоке."""
+    # Эта функция вызывается при остановке, поэтому просто закрываем для текущего основного потока
+    close_db_connection()

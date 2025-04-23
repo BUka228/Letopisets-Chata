@@ -7,16 +7,13 @@ from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-# Импортируем нужные модули и функции
 import data_manager as dm
 import gemini_client as gc
-# ИЗМЕНЕНО: Импортируем функцию скачивания и константу
-from jobs import download_images, MAX_PHOTOS_TO_ANALYZE
+from jobs import download_images, MAX_PHOTOS_TO_ANALYZE # Импортируем из jobs
 from config import SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_TIMEZONE_STR
 
 logger = logging.getLogger(__name__)
 
-# --- Обработчики команд (start, help - без изменений) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat = update.effective_chat
@@ -25,7 +22,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html(
         rf"Привет, {user.mention_html()}! Я собираю сообщения в этом чате ({getattr(chat, 'title', 'личном')}) "
         f"и каждый день в ~{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} (по времени {SCHEDULE_TIMEZONE_STR}) "
-        "генерирую краткую историю дня, теперь **с анализом изображений**! \n\n" # Уточнили приветствие
+        "генерирую краткую историю дня, теперь **с анализом изображений**! \n\n"
         "Используйте /help для списка команд.",
     )
     commands = [
@@ -34,6 +31,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         BotCommand("generate_now", "Сгенерировать историю дня немедленно (тест)"),
     ]
     try:
+        # Устанавливаем команды глобально или для чата
         await context.bot.set_my_commands(commands)
     except TelegramError as e:
         logger.warning(f"Не удалось установить команды бота для чата {chat.id}: {e}")
@@ -56,84 +54,65 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Просто добавьте меня в группу!"
     )
 
-
-# --- ИЗМЕНЕНО: generate_now теперь тоже скачивает фото ---
 async def generate_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Генерирует историю для текущего чата по запросу с анализом изображений."""
     user = update.effective_user
     chat = update.effective_chat
     if not user or not chat: return
-
     logger.info(f"Пользователь {user.username} ({user.id}) запросил /generate_now для чата {chat.id}")
-
     messages_current = dm.get_messages_for_chat(chat.id)
-
     if not messages_current:
         await update.message.reply_text("В этом чате пока нет сообщений за сегодня для создания истории.")
         return
-
-    # Уведомляем пользователя о начале работы
     msg_count_text = f"{len(messages_current)} сообщ."
     photo_count = sum(1 for m in messages_current if m.get('type') == 'photo')
     photo_process_limit = min(photo_count, MAX_PHOTOS_TO_ANALYZE)
     if photo_count > 0:
         msg_count_text += f" и {photo_count} фото (до {photo_process_limit} будут проанализированы)"
-
     msg = await update.message.reply_text(f"⏳ Анализирую {msg_count_text} и генерирую историю дня с помощью Gemini... Ожидайте.")
-
-    # --- ИЗМЕНЕНО: Скачивание изображений ---
-    downloaded_images = await download_images(context, messages_current, chat.id, MAX_PHOTOS_TO_ANALYZE)
-
-    # 1. Подготовка мультимодального контента
-    gemini_input_content = gc.prepare_story_parts(messages_current, downloaded_images)
-
-    # 2. Генерация истории через Gemini API
-    story, note_or_error = await gc.generate_story_from_gemini(gemini_input_content)
-
-    # 3. Отправка результата (логика редактирования/отправки остается прежней)
-    if story:
-        final_message = ""
-        try:
-            MAX_MESSAGE_LENGTH = 4000
-            photo_note = f" (с анализом до {photo_process_limit} фото)" if downloaded_images else ""
-            final_message_header = f"✨ История дня (по запросу){photo_note}:\n\n"
-
-            if len(final_message_header + story) > MAX_MESSAGE_LENGTH:
-                 logger.warning(f"История (generate_now) для чата {chat.id} слишком длинная, разбиваем.")
-                 await msg.edit_text(f"История готова!{photo_note} Она получилась довольно длинной, отправляю по частям:")
-                 await asyncio.sleep(0.5)
-                 parts = [story[j:j+MAX_MESSAGE_LENGTH] for j in range(0, len(story), MAX_MESSAGE_LENGTH)]
-                 for k, part in enumerate(parts):
-                     await context.bot.send_message(chat_id=chat.id, text=part)
+    try:
+        downloaded_images = await download_images(context, messages_current, chat.id, MAX_PHOTOS_TO_ANALYZE)
+        gemini_input_content = gc.prepare_story_parts(messages_current, downloaded_images)
+        story, note_or_error = await gc.generate_story_from_gemini(gemini_input_content)
+        if story:
+            final_message = ""
+            try:
+                MAX_MESSAGE_LENGTH = 4000
+                photo_note = f" (с анализом до {photo_process_limit} фото)" if downloaded_images else ""
+                final_message_header = f"✨ История дня (по запросу){photo_note}:\n\n"
+                if len(final_message_header + story) > MAX_MESSAGE_LENGTH:
+                     logger.warning(f"История (generate_now) для чата {chat.id} слишком длинная, разбиваем.")
+                     await msg.edit_text(f"История готова!{photo_note} Она получилась довольно длинной, отправляю по частям:")
                      await asyncio.sleep(0.5)
-            else:
-                 final_message = final_message_header + story
-                 await msg.edit_text(final_message)
+                     parts = [story[j:j+MAX_MESSAGE_LENGTH] for j in range(0, len(story), MAX_MESSAGE_LENGTH)]
+                     for k, part in enumerate(parts):
+                         await context.bot.send_message(chat_id=chat.id, text=part)
+                         await asyncio.sleep(0.5)
+                else:
+                     final_message = final_message_header + story
+                     await msg.edit_text(final_message)
+                logger.info(f"История по запросу (generate_now) успешно отправлена/отредактирована в чате {chat.id}.")
+                if note_or_error:
+                     try: await context.bot.send_message(chat_id=chat.id, text=f"ℹ️ Примечание: {note_or_error}")
+                     except TelegramError as e_note: logger.warning(f"Не удалось отправить примечание для /generate_now: {e_note}")
+            except TelegramError as e:
+                logger.error(f"Ошибка Telegram при отправке/ред. истории (generate_now): {e}")
+                if "message to edit not found" in str(e).lower() and final_message:
+                     try: await context.bot.send_message(chat_id=chat.id, text=final_message)
+                     except TelegramError as e_send: logger.error(f"Попытка отправить как новое сообщение тоже не удалась: {e_send}")
+                else:
+                     await update.message.reply_text(f"Не удалось отправить историю: {e}.")
+            except Exception as e:
+                logger.error(f"Неожиданная ошибка при отправке истории (generate_now): {e}", exc_info=True)
+                await update.message.reply_text(f"Произошла неожиданная ошибка при отправке.")
+        else:
+            logger.warning(f"Не удалось сгенерировать историю (generate_now) для чата {chat.id}. Причина: {note_or_error}")
+            reply_error = note_or_error or "Неизвестная ошибка."
+            await msg.edit_text(f"😕 Не удалось сгенерировать историю.\nПричина: {reply_error}")
+    except Exception as e:
+         logger.error(f"Общая ошибка в /generate_now для чата {chat.id}: {e}", exc_info=True)
+         await msg.edit_text("Произошла внутренняя ошибка при обработке запроса.")
 
-            logger.info(f"История по запросу (generate_now) успешно отправлена/отредактирована в чате {chat.id}.")
 
-            if note_or_error:
-                 try:
-                      await context.bot.send_message(chat_id=chat.id, text=f"ℹ️ Примечание от нейросети: {note_or_error}")
-                 except TelegramError as e_note:
-                      logger.warning(f"Не удалось отправить примечание для /generate_now в чат {chat.id}: {e_note}")
-
-        except TelegramError as e:
-            logger.error(f"Ошибка Telegram при отправке/редактировании истории (generate_now) в чат {chat.id}: {e}")
-            if "message to edit not found" in str(e).lower() and final_message:
-                 try: await context.bot.send_message(chat_id=chat.id, text=final_message)
-                 except TelegramError as e_send: logger.error(f"Попытка отправить как новое сообщение тоже не удалась: {e_send}")
-            else:
-                 await update.message.reply_text(f"Не удалось отправить историю из-за ошибки Telegram: {e}. Попробуйте позже.")
-        except Exception as e:
-            logger.error(f"Неожиданная ошибка при отправке истории (generate_now) для чата {chat.id}: {e}", exc_info=True)
-            await update.message.reply_text(f"Произошла неожиданная ошибка при отправке.")
-    else:
-        logger.warning(f"Не удалось сгенерировать историю по запросу (generate_now) для чата {chat.id}. Причина: {note_or_error}")
-        reply_error = note_or_error or "Не удалось сгенерировать историю по неизвестной причине."
-        await msg.edit_text(f"😕 Не удалось сгенерировать историю.\nПричина: {reply_error}")
-
-# --- Обработчик сообщений handle_message (без изменений) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if not message or not message.from_user or not message.chat: return
@@ -151,47 +130,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         'content': None,
         'file_id': None,
         'file_unique_id': None,
-        'file_name': None # Добавим поле для имени файла (для документов/аудио)
+        'file_name': None
     }
     file_info = None
-    if message.text:
-        message_data['type'] = 'text'
-        message_data['content'] = message.text
-    elif message.sticker:
-        message_data['type'] = 'sticker'
-        message_data['content'] = message.sticker.emoji
-        file_info = message.sticker
-    elif message.photo:
-        message_data['type'] = 'photo'
-        message_data['content'] = message.caption
-        file_info = message.photo[-1]
-    elif message.video:
-        message_data['type'] = 'video'
-        message_data['content'] = message.caption
-        file_info = message.video
-    elif message.audio:
-        message_data['type'] = 'audio'
-        message_data['content'] = message.caption
-        file_info = message.audio
-        if hasattr(file_info, 'file_name'): message_data['file_name'] = file_info.file_name
-    elif message.voice:
-        message_data['type'] = 'voice'
-        file_info = message.voice
-    elif message.video_note:
-        message_data['type'] = 'video_note'
-        file_info = message.video_note
-    elif message.document:
-        message_data['type'] = 'document'
-        message_data['content'] = message.caption
-        file_info = message.document
-        if hasattr(file_info, 'file_name'): message_data['file_name'] = file_info.file_name
-    elif message.caption and message_data['type'] == 'unknown':
-         message_data['type'] = 'media_with_caption'
-         message_data['content'] = message.caption
+    if message.text: message_data['type'] = 'text'; message_data['content'] = message.text
+    elif message.sticker: message_data['type'] = 'sticker'; message_data['content'] = message.sticker.emoji; file_info = message.sticker
+    elif message.photo: message_data['type'] = 'photo'; message_data['content'] = message.caption; file_info = message.photo[-1]
+    elif message.video: message_data['type'] = 'video'; message_data['content'] = message.caption; file_info = message.video
+    elif message.audio: message_data['type'] = 'audio'; message_data['content'] = message.caption; file_info = message.audio
+    elif message.voice: message_data['type'] = 'voice'; file_info = message.voice
+    elif message.video_note: message_data['type'] = 'video_note'; file_info = message.video_note
+    elif message.document: message_data['type'] = 'document'; message_data['content'] = message.caption; file_info = message.document
+    elif message.caption and message_data['type'] == 'unknown': message_data['type'] = 'media_with_caption'; message_data['content'] = message.caption
     if file_info:
         try:
-             message_data['file_id'] = file_info.file_id
-             message_data['file_unique_id'] = file_info.file_unique_id
+            message_data['file_id'] = file_info.file_id
+            message_data['file_unique_id'] = file_info.file_unique_id
+            if hasattr(file_info, 'file_name'): message_data['file_name'] = file_info.file_name
         except AttributeError:
              logger.warning(f"Не удалось получить file_id/unique_id для типа {message_data['type']} в чате {chat_id}")
     if message_data['type'] != 'unknown':

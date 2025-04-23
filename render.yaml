@@ -1,0 +1,28 @@
+services:
+  # ИЗМЕНЕНО: тип сервиса на 'web'
+  - type: web
+    name: telegram-story-bot # Имя сервиса
+    env: python
+    plan: free # Используем бесплатный веб-сервис
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "bash start.sh" # Команда запуска остается той же
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11 # Укажите вашу версию Python
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false # Устанавливать через UI
+      - key: GEMINI_API_KEY
+        sync: false # Устанавливать через UI
+      - key: DATA_FILE_PATH
+        value: /var/data/bot_data.db
+      - key: LOG_LEVEL
+        value: INFO
+      # Важно для Web Service: Убедимся, что Render знает,
+      # что сервис "здоров", даже если бот перезапускается.
+      # Render будет пинговать корневой путь '/'.
+    healthCheckPath: / # Путь для health check запросов
+    disks:
+      - name: data
+        mountPath: /var/data
+        sizeGB: 1
+    autoDeploy: yes
