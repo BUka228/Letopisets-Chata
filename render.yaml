@@ -1,29 +1,35 @@
-# render.yaml (Исправленная версия)
+# render.yaml (Версия 3 - Гарантированно верхний уровень)
 
-# --- Блок disks теперь на верхнем уровне ---
+# Определяем диски на самом верхнем уровне
 disks:
-  - name: data # Имя диска
-    mountPath: /var/data # Точка монтирования диска
-    sizeGB: 1 # Минимальный размер (1 ГБ бесплатно)
+  - name: data          # Имя для ссылки на диск
+    mountPath: /var/data # Куда монтировать в контейнере
+    sizeGB: 1          # Размер (1 ГБ бесплатно)
 
+# Определяем сервисы после всех объявлений верхнего уровня
 services:
-  - type: web # Используем тип 'web'
-    name: telegram-story-bot # Имя вашего сервиса на Render
-    env: python # Указываем окружение Python
-    plan: free # Используем бесплатный тариф
-    buildCommand: "pip install -r requirements.txt" # Команда для установки зависимостей
-    startCommand: "bash start.sh" # Команда для запуска вашего бота
+  - type: web
+    name: telegram-story-bot # Имя сервиса
+    env: python
+    plan: free
+    region: frankfurt # Опционально: можно указать регион (напр., ближе к вам или Telegram)
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "bash start.sh"
+    healthCheckPath: /
     envVars:
-      - key: PYTHON_VERSION # Указываем желаемую версию Python
-        value: 3.11 # Или 3.10, 3.12
+      - key: PYTHON_VERSION
+        value: 3.11
       - key: TELEGRAM_BOT_TOKEN
-        sync: false # Не синхронизировать из YAML, устанавливать через UI Render
+        sync: false # Устанавливать через UI
       - key: GEMINI_API_KEY
-        sync: false # Не синхронизировать из YAML, устанавливать через UI Render
-      - key: DATA_FILE_PATH # Путь к БД на персистентном диске Render
-        value: /var/data/bot_data.db # Используем путь из определения диска выше
-      - key: LOG_LEVEL # Можно переопределить уровень логов для продакшена
-        value: INFO # Или DEBUG
-    healthCheckPath: / # Путь для health check запросов
-    # --- Блок disks УБРАН отсюда ---
-    autoDeploy: yes # Автоматически развертывать при изменениях в репозитории
+        sync: false # Устанавливать через UI
+      - key: DATA_FILE_PATH # Путь к БД, использующий mountPath диска
+        value: /var/data/bot_data.db
+      - key: LOG_LEVEL
+        value: INFO
+    autoDeploy: yes # Включить авторазвертывание из Git
+    # --- Ссылка на ранее определенный диск ---
+    # Указываем, какой диск использовать для этого сервиса
+    disk:
+      name: data # Имя диска, определенное выше
+      mountPath: /var/data # Точка монтирования (должна совпадать)
