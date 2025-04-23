@@ -1,18 +1,11 @@
-# render.yaml (Версия 4 - Упрощенная привязка диска)
+# render.yaml (Версия 5 - Диск ВНУТРИ сервиса, синтаксис по документации)
 
-# Определяем диски на самом верхнем уровне
-disks:
-  - name: data          # Имя диска (важно, чтобы оно было уникальным)
-    mountPath: /var/data # Точка монтирования в контейнере
-    sizeGB: 1          # Размер (1 ГБ бесплатно)
-
-# Определяем сервисы
 services:
   - type: web
     name: telegram-story-bot # Имя сервиса
     env: python
     plan: free
-    region: frankfurt # Опционально
+    region: frankfurt # Опционально: можно указать регион (напр., ближе к вам или Telegram)
     buildCommand: "pip install -r requirements.txt"
     startCommand: "bash start.sh"
     healthCheckPath: /
@@ -20,13 +13,17 @@ services:
       - key: PYTHON_VERSION
         value: 3.11
       - key: TELEGRAM_BOT_TOKEN
-        sync: false
+        sync: false # Устанавливать через UI
       - key: GEMINI_API_KEY
-        sync: false
-      - key: DATA_FILE_PATH # Путь к БД, совпадающий с mountPath диска
-        value: /var/data/bot_data.db # Render должен автоматически использовать диск 'data'
+        sync: false # Устанавливать через UI
+      - key: DATA_FILE_PATH # Путь к БД, использующий mountPath диска
+        value: /var/data/bot_data.db
       - key: LOG_LEVEL
         value: INFO
-    autoDeploy: yes
-    # --- Явная секция disk: УБРАНА ---
-    # Render должен сам связать диск по совпадающему mountPath
+    autoDeploy: yes # Включить авторазвертывание из Git
+    # --- Определение диска ВНУТРИ сервиса ---
+    # Используем единственное число 'disk' и свойства из документации
+    disk:
+      name: data          # Имя диска (должно быть уникальным для Blueprint)
+      mountPath: /var/data # Куда монтировать в контейнере
+      sizeGB: 1          # Размер (1 ГБ бесплатно)
