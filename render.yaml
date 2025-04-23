@@ -1,18 +1,18 @@
-# render.yaml (Версия 3 - Гарантированно верхний уровень)
+# render.yaml (Версия 4 - Упрощенная привязка диска)
 
 # Определяем диски на самом верхнем уровне
 disks:
-  - name: data          # Имя для ссылки на диск
-    mountPath: /var/data # Куда монтировать в контейнере
+  - name: data          # Имя диска (важно, чтобы оно было уникальным)
+    mountPath: /var/data # Точка монтирования в контейнере
     sizeGB: 1          # Размер (1 ГБ бесплатно)
 
-# Определяем сервисы после всех объявлений верхнего уровня
+# Определяем сервисы
 services:
   - type: web
     name: telegram-story-bot # Имя сервиса
     env: python
     plan: free
-    region: frankfurt # Опционально: можно указать регион (напр., ближе к вам или Telegram)
+    region: frankfurt # Опционально
     buildCommand: "pip install -r requirements.txt"
     startCommand: "bash start.sh"
     healthCheckPath: /
@@ -20,16 +20,13 @@ services:
       - key: PYTHON_VERSION
         value: 3.11
       - key: TELEGRAM_BOT_TOKEN
-        sync: false # Устанавливать через UI
+        sync: false
       - key: GEMINI_API_KEY
-        sync: false # Устанавливать через UI
-      - key: DATA_FILE_PATH # Путь к БД, использующий mountPath диска
-        value: /var/data/bot_data.db
+        sync: false
+      - key: DATA_FILE_PATH # Путь к БД, совпадающий с mountPath диска
+        value: /var/data/bot_data.db # Render должен автоматически использовать диск 'data'
       - key: LOG_LEVEL
         value: INFO
-    autoDeploy: yes # Включить авторазвертывание из Git
-    # --- Ссылка на ранее определенный диск ---
-    # Указываем, какой диск использовать для этого сервиса
-    disk:
-      name: data # Имя диска, определенное выше
-      mountPath: /var/data # Точка монтирования (должна совпадать)
+    autoDeploy: yes
+    # --- Явная секция disk: УБРАНА ---
+    # Render должен сам связать диск по совпадающему mountPath
