@@ -1,28 +1,29 @@
+# render.yaml (Исправленная версия)
+
+# --- Блок disks теперь на верхнем уровне ---
+disks:
+  - name: data # Имя диска
+    mountPath: /var/data # Точка монтирования диска
+    sizeGB: 1 # Минимальный размер (1 ГБ бесплатно)
+
 services:
-  # ИЗМЕНЕНО: тип сервиса на 'web'
-  - type: web
-    name: telegram-story-bot # Имя сервиса
-    env: python
-    plan: free # Используем бесплатный веб-сервис
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "bash start.sh" # Команда запуска остается той же
+  - type: web # Используем тип 'web'
+    name: telegram-story-bot # Имя вашего сервиса на Render
+    env: python # Указываем окружение Python
+    plan: free # Используем бесплатный тариф
+    buildCommand: "pip install -r requirements.txt" # Команда для установки зависимостей
+    startCommand: "bash start.sh" # Команда для запуска вашего бота
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11 # Укажите вашу версию Python
+      - key: PYTHON_VERSION # Указываем желаемую версию Python
+        value: 3.11 # Или 3.10, 3.12
       - key: TELEGRAM_BOT_TOKEN
-        sync: false # Устанавливать через UI
+        sync: false # Не синхронизировать из YAML, устанавливать через UI Render
       - key: GEMINI_API_KEY
-        sync: false # Устанавливать через UI
-      - key: DATA_FILE_PATH
-        value: /var/data/bot_data.db
-      - key: LOG_LEVEL
-        value: INFO
-      # Важно для Web Service: Убедимся, что Render знает,
-      # что сервис "здоров", даже если бот перезапускается.
-      # Render будет пинговать корневой путь '/'.
+        sync: false # Не синхронизировать из YAML, устанавливать через UI Render
+      - key: DATA_FILE_PATH # Путь к БД на персистентном диске Render
+        value: /var/data/bot_data.db # Используем путь из определения диска выше
+      - key: LOG_LEVEL # Можно переопределить уровень логов для продакшена
+        value: INFO # Или DEBUG
     healthCheckPath: / # Путь для health check запросов
-    disks:
-      - name: data
-        mountPath: /var/data
-        sizeGB: 1
-    autoDeploy: yes
+    # --- Блок disks УБРАН отсюда ---
+    autoDeploy: yes # Автоматически развертывать при изменениях в репозитории
