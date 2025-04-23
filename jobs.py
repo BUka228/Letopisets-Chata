@@ -90,7 +90,7 @@ async def daily_story_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                  logger.warning(f"{current_chat_log_prefix} Не удалось подготовить контент для Gemini. Пропускаем чат.")
                  await asyncio.sleep(1)
                  continue
-            story, note_or_error = await gc.generate_story_from_gemini(gemini_input_content)
+            story, note_or_error = await gc.generate_story_from_proxy(gemini_input_content)
             if story:
                 try:
                     MAX_MESSAGE_LENGTH = 4000

@@ -6,12 +6,15 @@ import datetime
 import signal
 import asyncio
 
+# Импортируем компоненты из других файлов
 from config import (
     TELEGRAM_BOT_TOKEN, SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_TIMEZONE,
     MESSAGE_FILTERS, validate_config, setup_logging
 )
 import data_manager as dm
-import gemini_client as gc
+# ИЗМЕНЕНО: Больше не импортируем gc (gemini_client) здесь напрямую,
+# так как настройка Gemini больше не нужна. Он будет импортирован в jobs.py и bot_handlers.py.
+# import gemini_client as gc
 import bot_handlers
 import jobs
 
@@ -40,11 +43,15 @@ def configure_handlers(app: Application):
 
 def configure_scheduler(app: Application):
     job_queue = app.job_queue
+    # --- ИЗМЕНЕНО: Проверка, что job_queue существует ---
+    if not job_queue:
+        logger.warning("JobQueue не инициализирована (возможно, отсутствует зависимость APScheduler?). Планировщик не будет настроен.")
+        return
     run_time = datetime.time(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, tzinfo=SCHEDULE_TIMEZONE)
     job_daily = job_queue.run_daily(
         jobs.daily_story_job,
         time=run_time,
-        name="daily_gemini_story_generation"
+        name="daily_gemini_story_generation" # Имя можно изменить, т.к. теперь вызываем прокси
     )
     logger.info(f"Ежедневная задача генерации историй запланирована на {run_time.strftime('%H:%M:%S %Z')}.")
 
@@ -67,7 +74,7 @@ def main() -> None:
     global application
     logger.info("Инициализация бота...")
     try:
-        validate_config()
+        validate_config() # Проверяем наличие TELEGRAM_BOT_TOKEN, CLOUDFLARE_WORKER_URL, CLOUDFLARE_AUTH_TOKEN
     except ValueError as e:
         logger.critical(e)
         return
@@ -76,10 +83,13 @@ def main() -> None:
     except Exception as e:
          logger.critical(f"Не удалось инициализировать базу данных: {e}. Запуск отменен.", exc_info=True)
          return
-    if not gc.configure_gemini():
-        logger.critical("Не удалось настроить Gemini API. Запуск бота отменен.")
-        dm.close_all_connections()
-        return
+
+    # --- ИЗМЕНЕНО: Удален блок настройки Gemini ---
+    # if not gc.configure_gemini():
+    #     logger.critical("Не удалось настроить Gemini API. Запуск бота отменен.")
+    #     dm.close_all_connections()
+    #     return
+    # --------------------------------------------
 
     defaults = Defaults(parse_mode=ParseMode.HTML)
     application = (
@@ -87,8 +97,6 @@ def main() -> None:
         .token(TELEGRAM_BOT_TOKEN)
         .defaults(defaults)
         .post_init(post_init)
-        # Можно настроить количество одновременных обработчиков, если нужно
-        # .concurrent_updates(10)
         .build()
     )
 
@@ -103,13 +111,7 @@ def main() -> None:
         asyncio.ensure_future(shutdown_signal_handler(sig_num))
 
     signals_to_handle = (signal.SIGINT, signal.SIGTERM)
-    if platform.system() == "Windows":
-        logger.info("Настройка через signal.signal (Windows)...")
-        supported_signals = (signal.SIGINT,) # Только SIGINT обычно работает
-        for sig in supported_signals:
-            try: signal.signal(sig, _signal_wrapper)
-            except Exception as sig_e: logger.error(f"Не удалось установить обработчик signal.signal для {sig}: {sig_e}")
-    else:
+    if platform.system() != "Windows":
         logger.info("Настройка через loop.add_signal_handler (Unix-like)...")
         for sig in signals_to_handle:
             try: loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown_signal_handler(s)))
@@ -117,16 +119,20 @@ def main() -> None:
                  logger.warning(f"loop.add_signal_handler не поддерживается ({e}), используем fallback signal.signal...")
                  try: signal.signal(sig, _signal_wrapper)
                  except Exception as sig_e: logger.error(f"Не удалось установить обработчик signal.signal для {sig}: {sig_e}")
+    else:
+        logger.info("Настройка через signal.signal (Windows)...")
+        supported_signals = (signal.SIGINT,)
+        for sig in supported_signals:
+            try: signal.signal(sig, _signal_wrapper)
+            except Exception as sig_e: logger.error(f"Не удалось установить обработчик signal.signal для {sig}: {sig_e}")
 
     logger.info("Запуск бота...")
     try:
-        # Используем application.run_polling()
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
         logger.critical(f"Критическая ошибка во время работы polling: {e}", exc_info=True)
     finally:
         logger.info("Polling завершен или остановлен.")
-        # Финальное закрытие соединений на случай, если обработчик сигнала не сработал
         dm.close_all_connections()
         logger.info("Финальное закрытие соединений БД выполнено.")
         logger.info("Процесс бота завершен.")

@@ -1,27 +1,13 @@
-python-telegram-bot==22.0
-google-generativeai==0.8.5
+# Telegram Bot Library (Версия от пользователя, добавим [ext] на всякий случай, хотя apscheduler ниже)
+python-telegram-bot[ext]==22.0
+
+# Для загрузки .env файлов
 python-dotenv==1.1.0
-pytz==2025.2
 
+# Для работы с часовыми поясами (версия 2025.2 исправлена на актуальную)
+pytz==2024.1
 
-google-api-core >= 
-google-auth >= 2.14.1
-googleapis-common-protos >= 1.56.0
-proto-plus >= 1.22.3
-protobuf >= 3.19.5 # Важно для Google API
-grpcio >= 1.56.0
-cachetools >= 4.2.2 # Зависимость google-auth
-pyasn1-modules >= 0.2.1 # Зависимость google-auth
-pyasn1 >= 0.4.6 # Зависимость google-auth
-rsa >= 3.1.4 # Зависимость google-auth
-httpx >= 0.24.1 # Используется PTB и Google
-httpcore >= 0.17.3 # Зависимость httpx
-certifi >= 2022.12.7 # Для SSL сертификатов
-charset-normalizer >= 2.0.0 # Зависимость requests/httpx?
-idna >= 2.0 # Зависимость requests/httpx?
-urllib3 >= 1.26 # Часто используется для HTTP
+# Для асинхронных HTTP-запросов к прокси Cloudflare Worker
+httpx>=0.25.0,<0.28.0
 
-# Можно добавить typing_extensions, т.к. часто используется
-typing_extensions >= 4.0.0
-
-Flask>=2.3,<4.0
+# Зависимость для JobQueue в python-telegram-bot v21+

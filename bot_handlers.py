@@ -72,7 +72,7 @@ async def generate_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         downloaded_images = await download_images(context, messages_current, chat.id, MAX_PHOTOS_TO_ANALYZE)
         gemini_input_content = gc.prepare_story_parts(messages_current, downloaded_images)
-        story, note_or_error = await gc.generate_story_from_gemini(gemini_input_content)
+        story, note_or_error = await gc.generate_story_from_proxy(gemini_input_content)
         if story:
             final_message = ""
             try:
