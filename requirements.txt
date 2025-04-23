@@ -1,13 +1,17 @@
-# Telegram Bot Library (Версия от пользователя, добавим [ext] на всякий случай, хотя apscheduler ниже)
+# Telegram Bot Library
 python-telegram-bot[ext]==22.0
 
 # Для загрузки .env файлов
 python-dotenv==1.1.0
 
-# Для работы с часовыми поясами (версия 2025.2 исправлена на актуальную)
+# Для работы с часовыми поясами
 pytz==2024.1
 
 # Для асинхронных HTTP-запросов к прокси Cloudflare Worker
 httpx>=0.25.0,<0.28.0
 
 # Зависимость для JobQueue в python-telegram-bot v21+
+APScheduler>=3.10.0,<4.1.0
+
+# Библиотека для повторных попыток (Retries)
+tenacity>=8.2.0,<9.0.0
