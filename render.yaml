@@ -1,0 +1,27 @@
+services:
+  - type: worker # Тип службы - фоновый воркер, идеально для бота
+    name: telegram-story-bot # Имя вашего сервиса на Render
+    env: python # Среда выполнения
+    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt" # Команда для установки зависимостей
+    startCommand: "python main.py" # Команда для запуска вашего бота
+    plan: free # Используем бесплатный тарифный план
+    envVars: # Переменные окружения (значения зададим в интерфейсе Render)
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false # Не хранить значение в render.yaml
+      - key: GEMINI_API_KEY
+        sync: false # Не хранить значение в render.yaml
+      - key: SCHEDULE_TIMEZONE # Если используется не UTC по умолчанию
+        value: UTC # Можно задать здесь или в интерфейсе
+        sync: false
+      - key: SCHEDULE_HOUR # Если используется не 0 по умолчанию
+        value: 0
+        sync: false
+      - key: SCHEDULE_MINUTE # Если используется не 5 по умолчанию
+        value: 5
+        sync: false
+      - key: PYTHON_VERSION # Указать версию Python для Render (если нужно)
+        value: 3.11 # Или 3.10, 3.12 и т.д.
+    disks: # Настройка персистентного диска для SQLite и логов
+      - name: data # Имя диска
+        mountPath: /data # Куда будет смонтирован диск внутри контейнера
+        sizeGB: 1 # Минимальный размер (бесплатно)
