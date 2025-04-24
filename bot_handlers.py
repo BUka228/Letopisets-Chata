@@ -4,6 +4,7 @@ import datetime
 import asyncio
 import time
 import re
+import pytz
 from typing import Optional, Dict, Any, Tuple
 
 # Импорты из Telegram
@@ -27,7 +28,7 @@ from jobs import (
 )
 from config import (
     SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_TIMEZONE_STR, BOT_OWNER_ID,
-    SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE
+    SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE, COMMON_TIMEZONES # <-- Добавлено сюда
 )
 from localization import get_text, get_chat_lang, update_chat_lang_cache, LOCALIZED_TEXTS
 from telegram import __version__ as ptb_version
@@ -36,11 +37,12 @@ logger = logging.getLogger(__name__)
 # bot_start_time убран отсюда, берем из context.application.bot_data
 
 # --- Константы для состояний ConversationHandler ---
-SELECTING_LANG, AWAITING_TIME = map(str, range(2)) # Используем строки для состояний
+SELECTING_LANG, AWAITING_TIME, SELECTING_TZ = map(str, range(3)) 
 # --- Константы для Callback Data ---
 CB_TOGGLE_STATUS = "settings_toggle_status"
 CB_CHANGE_LANG = "settings_change_lang"
 CB_CHANGE_TIME = "settings_change_time"
+CB_CHANGE_TZ = "settings_change_tz" 
 CB_SET_TIME_DEFAULT = "set_time_default"
 CB_CANCEL_CONV = "conv_cancel"
 CB_SHOW_SETTINGS = "show_settings" # Для кнопки в /start
@@ -74,48 +76,73 @@ async def is_user_admin(
     except Exception as e:
         logger.exception(f"Unexpected error checking admin {user_id} in chat {chat_id}: {e}")
         return False
+    
+def format_time_for_chat(utc_hour: int, utc_minute: int, target_tz_str: str) -> str:
+    """Конвертирует время UTC HH:MM в строку для таймзоны чата."""
+    try:
+        target_tz = pytz.timezone(target_tz_str)
+        # Создаем datetime в UTC с произвольной датой, чтобы применить смещение
+        # Важно: Может не учитывать переход на летнее/зимнее время корректно без полной даты
+        # Но для отображения HH:MM обычно достаточно
+        now_utc = datetime.datetime.now(pytz.utc)
+        time_utc = now_utc.replace(hour=utc_hour, minute=utc_minute, second=0, microsecond=0)
+        time_local = time_utc.astimezone(target_tz)
+        # Возвращаем время и аббревиатуру таймзоны (может быть неоднозначной)
+        return time_local.strftime(f"%H:%M %Z") # (%z для смещения +/-HHMM)
+    except Exception as e:
+        logger.error(f"Ошибка форматирования времени {utc_hour}:{utc_minute} для TZ {target_tz_str}: {e}")
+        return f"{utc_hour:02d}:{utc_minute:02d} UTC" # Возвращаем UTC при ошибке
 
-async def get_settings_text_and_markup(
-    chat_id: int, chat_title: Optional[str]
-) -> Tuple[str, InlineKeyboardMarkup]:
-    """Генерирует текст и инлайн-клавиатуру для сообщения с настройками."""
+
+async def get_settings_text_and_markup(chat_id: int, chat_title: Optional[str]) -> Tuple[str, InlineKeyboardMarkup]:
+    """Генерирует текст и кнопки настроек, учитывая таймзону."""
     chat_lang = await get_chat_lang(chat_id)
     settings = dm.get_chat_settings(chat_id)
+    chat_tz_str = settings.get('timezone', 'UTC') # Получаем таймзону чата
+
     is_enabled = settings.get('enabled', True)
     current_lang = settings.get('lang', DEFAULT_LANGUAGE)
-    custom_time = settings.get('custom_schedule_time')
+    custom_time_utc_str = settings.get('custom_schedule_time')
 
-    # Формируем текст
-    status_text = get_text(
-        "settings_enabled" if is_enabled else "settings_disabled", chat_lang
-    )
+    status_text = get_text("settings_enabled" if is_enabled else "settings_disabled", chat_lang)
     lang_name = LOCALIZED_TEXTS.get(current_lang, {}).get("lang_name", current_lang)
     lang_text = get_text("settings_language_label", chat_lang) + f": {lang_name}"
 
-    if custom_time:
-        time_text = get_text("settings_time_custom", chat_lang, custom_time=custom_time)
+    # --- ИЗМЕНЕНО: Форматируем время с учетом таймзоны чата ---
+    if custom_time_utc_str:
+        try:
+            ch, cm = map(int, custom_time_utc_str.split(':'))
+            local_time_str = format_time_for_chat(ch, cm, chat_tz_str)
+            time_text = get_text("settings_time_custom", chat_lang, custom_time=local_time_str) + f" ({custom_time_utc_str} UTC)"
+        except ValueError:
+             time_text = f"{custom_time_utc_str} UTC (неверный формат!)"
     else:
-        time_text = get_text(
-            "settings_default_time", chat_lang,
-            default_hh=f"{SCHEDULE_HOUR:02d}", default_mm=f"{SCHEDULE_MINUTE:02d}"
-        )
+        local_time_str = format_time_for_chat(SCHEDULE_HOUR, SCHEDULE_MINUTE, chat_tz_str)
+        time_text = get_text("settings_default_time", chat_lang, default_time=local_time_str) + f" (~{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} UTC)"
+    # -----------------------------------------------------------
+
+    # --- НОВОЕ: Отображаем текущую таймзону ---
+    tz_display_name = COMMON_TIMEZONES.get(chat_tz_str, chat_tz_str) # Отображаемое имя
+    timezone_text = get_text("settings_timezone_label", chat_lang) + f" {tz_display_name}"
+    # -----------------------------------------
 
     text = (
         f"{get_text('settings_title', chat_lang, chat_title=chat_title or 'Unknown')}\n\n"
         f"▪️ {get_text('settings_status_label', chat_lang)} {status_text}\n"
         f"▪️ {lang_text}\n"
-        f"▪️ {get_text('settings_time_label', chat_lang)} {time_text}"
+        f"▪️ {time_text}\n"
+        f"▪️ {timezone_text}" # Добавили строку таймзоны
     )
 
-    # Формируем кнопки
-    status_button_text = get_text(
-        "settings_button_status_on" if is_enabled else "settings_button_status_off",
-        chat_lang
-    )
+    # Кнопки
+    status_button_text = get_text("settings_button_status_on" if is_enabled else "settings_button_status_off", chat_lang)
     keyboard = [
         [InlineKeyboardButton(status_button_text, callback_data=CB_TOGGLE_STATUS)],
         [InlineKeyboardButton(get_text("settings_button_language", chat_lang), callback_data=CB_CHANGE_LANG)],
-        [InlineKeyboardButton(get_text("settings_button_time", chat_lang), callback_data=CB_CHANGE_TIME)],
+        [
+            InlineKeyboardButton(get_text("settings_button_time", chat_lang), callback_data=CB_CHANGE_TIME),
+            InlineKeyboardButton(get_text("settings_button_timezone", chat_lang), callback_data=CB_CHANGE_TZ) # Добавили кнопку TZ
+        ],
     ]
     markup = InlineKeyboardMarkup(keyboard)
     return text, markup
@@ -149,64 +176,44 @@ async def display_settings(
 # =============================================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /start."""
-    user = update.effective_user
-    chat = update.effective_chat
-    if not user or not chat:
-        return
-
-    chat_lang = await get_chat_lang(chat.id)
-    settings = dm.get_chat_settings(chat.id)
-    status_key = "settings_enabled" if settings.get('enabled', True) else "settings_disabled"
-    status_text = get_text(status_key, chat_lang).split(': ')[-1] # Только статус
-
-    logger.info(
-        f"User {user.id} ({user.username}) started bot in chat {chat.id} "
-        f"({getattr(chat, 'title', 'Private')})"
-    )
-
-    # Кнопки под сообщением
+    # ... (код без изменений, но обновим кнопки) ...
+    user = update.effective_user; chat = update.effective_chat; 
+    if not user or not chat: return
+    chat_lang = await get_chat_lang(chat.id); settings = dm.get_chat_settings(chat.id); status_key = "settings_enabled" if settings.get('enabled', True) else "settings_disabled"; status_text = get_text(status_key, chat_lang).split(': ')[-1]
+    # --- ИЗМЕНЕНО: Используем helper для форматирования времени ---
+    chat_tz = dm.get_chat_timezone(chat.id)
+    default_local_time = format_time_for_chat(SCHEDULE_HOUR, SCHEDULE_MINUTE, chat_tz)
+    # ----------------------------------------------------------
+    logger.info(f"User {user.id} started bot in chat {chat.id}")
     markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "⚙️ " + get_text("cmd_story_settings_desc", chat_lang),
-                callback_data=CB_SHOW_SETTINGS
-            ),
-            InlineKeyboardButton(
-                "🌐 " + get_text("cmd_language_desc", chat_lang),
-                callback_data=CB_CHANGE_LANG
-            )
-        ]
+        [InlineKeyboardButton("⚙️ " + get_text("cmd_story_settings_desc", chat_lang), callback_data=CB_SHOW_SETTINGS)],
+        [InlineKeyboardButton("🌐 " + get_text("cmd_language_desc", chat_lang), callback_data=CB_CHANGE_LANG),
+         InlineKeyboardButton("🌍 " + get_text("cmd_set_timezone_desc", chat_lang), callback_data=CB_CHANGE_TZ)] # Добавили кнопку TZ
     ])
-
     await update.message.reply_html(
-        get_text(
-            "start_message", chat_lang,
-            user_mention=user.mention_html(),
-            chat_title=f"<i>'{chat.title}'</i>" if chat.title else get_text('private_chat', chat_lang),
-            schedule_time=f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}",
-            schedule_tz=SCHEDULE_TIMEZONE_STR,
-            status=f"<b>{status_text}</b>"
-        ),
+        get_text("start_message", chat_lang, user_mention=user.mention_html(), chat_title=f"<i>'{chat.title}'</i>" if chat.title else get_text('private_chat', chat_lang),
+                 # --- ИЗМЕНЕНО: Показываем локальное время ---
+                 schedule_time=default_local_time,
+                 # -----------------------------------------
+                 schedule_tz=SCHEDULE_TIMEZONE_STR, # Оставляем UTC как базовый пояс
+                 status=f"<b>{status_text}</b>"),
         reply_markup=markup
     )
     # Установка команд теперь в post_init
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /help."""
-    chat = update.effective_chat
-    user = update.effective_user
-    if not chat or not user:
-        return
-
-    chat_lang = await get_chat_lang(chat.id)
-    logger.debug(f"Help command called in chat {chat.id} by user {user.id}")
+    # ... (код без изменений, но добавляем команду /set_timezone) ...
+    chat = update.effective_chat; user = update.effective_user; 
+    if not chat or not user: return
+    chat_lang = await get_chat_lang(chat.id); logger.debug(f"Help cmd chat={chat.id} user={user.id}")
+    # --- ИЗМЕНЕНО: Форматируем время ---
+    chat_tz = dm.get_chat_timezone(chat.id)
+    default_local_time = format_time_for_chat(SCHEDULE_HOUR, SCHEDULE_MINUTE, chat_tz)
+    # ---------------------------------
     await update.message.reply_html(
-        get_text(
-            "help_message", chat_lang,
-            schedule_time=f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}",
-            schedule_tz=SCHEDULE_TIMEZONE_STR
-        )
+        get_text("help_message", chat_lang,
+                 schedule_time=default_local_time, # Показываем локальное время
+                 schedule_tz=SCHEDULE_TIMEZONE_STR)
     )
 
 async def generate_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -412,6 +419,68 @@ async def regenerate_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logger.exception(f"Error in /regenerate_story chat={chat.id}: {e}")
         # Отвечаем на исходное сообщение /regenerate_story
         await update.message.reply_html(get_text("error_db_generic", chat_lang))
+
+async def ask_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Начинает диалог выбора таймзоны (entry point)."""
+    query = update.callback_query
+    user = update.effective_user or (query.from_user if query else None)
+    chat = update.effective_chat or (query.message.chat if query and query.message else None)
+    if not user or not chat: return ConversationHandler.END
+    context.user_data['conv_type'] = 'tz' # Помечаем тип диалога
+
+    chat_lang = await get_chat_lang(chat.id)
+
+    # Проверка прав админа (если вызвано кнопкой)
+    if query:
+        await query.answer()
+        is_admin = await is_user_admin(chat.id, user.id, context)
+        if not is_admin:
+            await query.edit_message_text(get_text("admin_only", chat_lang), reply_markup=None)
+            return ConversationHandler.END
+
+    # Формируем кнопки из COMMON_TIMEZONES
+    buttons = []
+    # Сортируем по отображаемому имени для удобства
+    sorted_tzs = sorted(COMMON_TIMEZONES.items(), key=lambda item: item[1])
+    for tz_id, tz_name in sorted_tzs:
+        buttons.append([InlineKeyboardButton(tz_name, callback_data=f"conv_settz_{tz_id}")])
+    buttons.append([InlineKeyboardButton("🚫 " + get_text("timezone_set_cancel", chat_lang), callback_data=CB_CANCEL_CONV)])
+    keyboard_markup = InlineKeyboardMarkup(buttons)
+    text = get_text("timezone_select", chat_lang)
+
+    if query: await query.edit_message_text(text=text, reply_markup=keyboard_markup, parse_mode=ParseMode.HTML)
+    elif update.message: await update.message.reply_html(text, reply_markup=keyboard_markup) # Если вызвано командой
+
+    return SELECTING_TZ # Переходим в состояние выбора TZ
+
+async def set_timezone_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор таймзоны."""
+    query = update.callback_query; 
+    if not query or not query.message: return ConversationHandler.END
+    await query.answer()
+    user = query.from_user; chat = query.message.chat; 
+    if not user or not chat: return ConversationHandler.END
+
+    tz_id = query.data.split("_", 2)[-1]
+
+    if tz_id in COMMON_TIMEZONES:
+        success = dm.update_chat_setting(chat.id, 'timezone', tz_id)
+        chat_lang = await get_chat_lang(chat.id) # Получаем язык ПОСЛЕ потенциального обновления
+        if success:
+            tz_name = COMMON_TIMEZONES[tz_id]
+            await query.edit_message_text(
+                text=get_text("timezone_set_success", chat_lang, tz_name=tz_name, tz_id=tz_id),
+                reply_markup=None, parse_mode=ParseMode.HTML
+            )
+        else:
+            await context.bot.send_message(chat_id=chat.id, text=get_text("error_db_generic", chat_lang))
+            try: await query.edit_message_reply_markup(reply_markup=None)
+            except BadRequest: pass
+    else:
+        await query.answer(text="Invalid timezone selected.", show_alert=True)
+
+    context.user_data.pop('conv_type', None)
+    return ConversationHandler.END
 
 async def story_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда для показа кнопок настроек (только админы)."""

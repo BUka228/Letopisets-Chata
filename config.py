@@ -37,6 +37,23 @@ LOG_FILE = os.getenv("LOG_FILE_PATH", "bot.log") # Путь к файлу лог
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "ru")
 SUPPORTED_LANGUAGES = ["ru", "en"]
 
+
+COMMON_TIMEZONES = {
+    "UTC": "UTC±00:00",
+    "Europe/London": "Лондон (GMT+0/GMT+1)",
+    "Europe/Berlin": "Берлин (CET/CEST)",
+    "Europe/Moscow": "Москва (MSK)",
+    "Asia/Yekaterinburg": "Екатеринбург (YEKT)",
+    "Asia/Dubai": "Дубай (GST)",
+    "Asia/Tashkent": "Ташкент (UZT)",
+    "Asia/Almaty": "Алматы (ALMT)",
+    "Asia/Tokyo": "Токио (JST)",
+    "America/New_York": "Нью-Йорк (EST/EDT)",
+    "America/Chicago": "Чикаго (CST/CDT)",
+    "America/Denver": "Денвер (MST/MDT)",
+    "America/Los_Angeles": "Лос-Анджелес (PST/PDT)"
+}
+
 # --- Фильтры сообщений ---
 MESSAGE_FILTERS = (
     filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO |

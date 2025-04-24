@@ -4,6 +4,7 @@ import sqlite3
 import threading
 import time
 import datetime
+import pytz
 import re # Для валидации времени
 
 from typing import List, Dict, Any, Optional, Tuple
@@ -152,47 +153,60 @@ def clear_messages_for_chat(chat_id: int):
 
 # --- Функции для Настроек Чата ---
 def get_chat_settings(chat_id: int) -> Dict[str, Any]:
-    """Возвращает настройки для чата. Создает запись по умолчанию, если нет."""
-    sql_select = "SELECT lang, enabled, custom_schedule_time FROM chat_settings WHERE chat_id = ?"
-    sql_insert = f"INSERT OR IGNORE INTO chat_settings (chat_id, lang, enabled, custom_schedule_time) VALUES (?, ?, ?, ?)"
-    default_settings = {'lang': DEFAULT_LANGUAGE, 'enabled': True, 'custom_schedule_time': None}
+    """Возвращает настройки для чата, включая timezone."""
+    # --- ИЗМЕНЕНО: Выбираем timezone ---
+    sql_select = "SELECT lang, enabled, custom_schedule_time, timezone FROM chat_settings WHERE chat_id = ?"
+    sql_insert = f"INSERT OR IGNORE INTO chat_settings (chat_id, lang, enabled, custom_schedule_time, timezone) VALUES (?, ?, ?, ?, ?)"
+    default_settings = {'lang': DEFAULT_LANGUAGE, 'enabled': True, 'custom_schedule_time': None, 'timezone': 'UTC'}
     try:
         row = _execute_query(sql_select, (chat_id,), fetch_one=True)
         if row: return dict(row)
         else:
             logger.info(f"Создание настроек по умолчанию для чата {chat_id}")
-            _execute_query(sql_insert, (chat_id, DEFAULT_LANGUAGE, 1, None))
+            # --- ИЗМЕНЕНО: Добавляем 'UTC' по умолчанию ---
+            _execute_query(sql_insert, (chat_id, DEFAULT_LANGUAGE, 1, None, 'UTC'))
             return default_settings
     except Exception: logger.exception(f"Не удалось получить/создать настройки для чата {chat_id}."); return default_settings
 
 def update_chat_setting(chat_id: int, setting_key: str, setting_value: Optional[str | bool | int]) -> bool:
-    """Обновляет настройку для чата. Возвращает True при успехе, False при ошибке."""
-    allowed_keys = ['lang', 'enabled', 'custom_schedule_time']
-    if setting_key not in allowed_keys: logger.error(f"Неверный ключ настройки '{setting_key}' для чата {chat_id}"); return False
+    """Обновляет настройку, добавляет валидацию timezone."""
+    # --- ИЗМЕНЕНО: Добавляем 'timezone' ---
+    allowed_keys = ['lang', 'enabled', 'custom_schedule_time', 'timezone']
+    if setting_key not in allowed_keys: logger.error(f"Неверный ключ настройки '{setting_key}' чат={chat_id}"); return False
 
-    value_to_save: Optional[str | int] = None # Инициализация
+    value_to_save: Optional[str | int] = None
     if setting_key == 'lang':
-        if not isinstance(setting_value, str) or setting_value not in SUPPORTED_LANGUAGES: logger.error(f"Неподдерживаемый язык '{setting_value}' для чата {chat_id}"); return False
+        # ... (валидация языка) ...
+        if not isinstance(setting_value, str) or setting_value not in SUPPORTED_LANGUAGES: logger.error(f"Неподдерживаемый язык '{setting_value}' чат={chat_id}"); return False
         value_to_save = setting_value
-    elif setting_key == 'enabled':
-        value_to_save = 1 if bool(setting_value) else 0
+    elif setting_key == 'enabled': value_to_save = 1 if bool(setting_value) else 0
     elif setting_key == 'custom_schedule_time':
+        # ... (валидация времени) ...
         if setting_value is None: value_to_save = None
         elif isinstance(setting_value, str) and re.fullmatch(r"^(?:[01]\d|2[0-3]):[0-5]\d$", setting_value): value_to_save = setting_value
-        else: logger.error(f"Неверный формат времени '{setting_value}' для чата {chat_id}. Ожидается HH:MM."); return False
+        else: logger.error(f"Неверный формат времени '{setting_value}' чат={chat_id}."); return False
+    # --- НОВОЕ: Валидация таймзоны ---
+    elif setting_key == 'timezone':
+        if not isinstance(setting_value, str): logger.error(f"Неверный тип для timezone '{setting_value}' чат={chat_id}"); return False
+        try:
+            # Проверяем, что pytz знает такую таймзону
+            pytz.timezone(setting_value)
+            value_to_save = setting_value
+        except pytz.exceptions.UnknownTimeZoneError:
+            logger.error(f"Неизвестная таймзона '{setting_value}' для чата {chat_id}")
+            return False
+    # --------------------------------
     else: logger.error("Непредвиденный ключ настройки."); return False
 
     sql = f"INSERT INTO chat_settings (chat_id, {setting_key}) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET {setting_key}=excluded.{setting_key}"
     try:
         _execute_query(sql, (chat_id, value_to_save))
-        logger.info(f"Настройка '{setting_key}' для чата {chat_id} обновлена на '{value_to_save}'.")
+        logger.info(f"Настройка '{setting_key}' чат={chat_id} обновлена на '{value_to_save}'.")
         if setting_key == 'lang' and isinstance(value_to_save, str):
-            try:
-                 from localization import update_chat_lang_cache # Динамический импорт для избежания цикла
-                 update_chat_lang_cache(chat_id, value_to_save)
-            except ImportError: logger.error("Не удалось импортировать localization для обновления кэша.")
+            try: from localization import update_chat_lang_cache; update_chat_lang_cache(chat_id, value_to_save)
+            except ImportError: logger.error("Failed to import localization for cache update.")
         return True
-    except Exception: logger.exception(f"Не удалось обновить настройку '{setting_key}' для чата {chat_id}."); return False
+    except Exception: logger.exception(f"Не удалось обновить '{setting_key}' чат={chat_id}."); return False
 
 def get_chat_language(chat_id: int) -> str:
     """Получает язык чата из БД или кэша."""
@@ -215,6 +229,20 @@ def get_enabled_chats() -> List[int]:
         logger.debug(f"Найдено {len(chat_ids)} активных чатов для обработки.")
     except Exception: logger.exception(f"Не удалось получить список активных чатов.")
     return chat_ids
+
+def get_chat_timezone(chat_id: int) -> str:
+    """Получает строку таймзоны для чата из БД."""
+    settings = get_chat_settings(chat_id)
+    tz_str = settings.get('timezone', 'UTC')
+    # Доп. проверка на валидность (на случай некорректных данных в БД)
+    try:
+        pytz.timezone(tz_str)
+        return tz_str
+    except pytz.exceptions.UnknownTimeZoneError:
+        logger.warning(f"В БД найдена невалидная таймзона '{tz_str}' для чата {chat_id}. Используется UTC.")
+        # Можно опционально исправить в БД
+        # update_chat_setting(chat_id, 'timezone', 'UTC')
+        return 'UTC'
 
 # --- Функции для Отзывов ---
 def add_feedback(message_id: int, chat_id: int, user_id: int, rating: int):
