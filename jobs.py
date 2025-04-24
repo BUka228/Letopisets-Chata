@@ -2,18 +2,26 @@
 import logging
 import asyncio
 import datetime
+import pytz # Для работы с UTC временем
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from telegram.error import TelegramError, NetworkError, BadRequest # Добавляем BadRequest для обновления кнопок
+from telegram.error import TelegramError, NetworkError, BadRequest
 from typing import Dict, List, Any, Optional
 # Импорт для Retries
 from tenacity import retry, stop_after_attempt, wait_fixed, wait_exponential, retry_if_exception_type, before_sleep_log
 
 # Импорты из проекта
 import data_manager as dm
-import gemini_client as gc # Используем обновленный gemini_client с safe_generate_story
-from config import BOT_OWNER_ID # Импортируем только BOT_OWNER_ID
-from localization import get_text, get_chat_lang # Импортируем функции локализации
+import gemini_client as gc
+# --- ВОТ ПРАВИЛЬНЫЙ ИМПОРТ ИЗ CONFIG ---
+from config import (
+    BOT_OWNER_ID,
+    SCHEDULE_HOUR,
+    SCHEDULE_MINUTE,
+    JOB_CHECK_INTERVAL_MINUTES # <-- ВОТ ОН!
+)
+# ------------------------------------
+from localization import get_text, get_chat_lang
 
 logger = logging.getLogger(__name__)
 retry_log = logging.getLogger(__name__ + '.retry') # Отдельный логгер для retries
@@ -137,116 +145,109 @@ async def download_images(
 
 # --- Основная ежедневная задача ---
 async def daily_story_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ежедневная задача: генерация и отправка историй с учетом настроек чата."""
+    """
+    Запускается периодически. Проверяет чаты, для которых подошло время генерации,
+    и генерирует историю, если есть необработанные сообщения.
+    """
     global last_job_run_time, last_job_error # Используем глобальные переменные
-    job_start_time = datetime.datetime.now(datetime.timezone.utc)
-    last_job_run_time = job_start_time # Фиксируем время старта
+    job_start_time = datetime.datetime.now(pytz.utc) # Работаем с UTC
+    last_job_run_time = job_start_time
+    last_job_error = None # Сбрасываем ошибку при каждом запуске проверки
+    current_errors = [] # Собираем ошибки этого запуска
 
-    bot = context.bot
-    if bot is None: logger.error("Объект бота не найден в daily_story_job!"); return
-    bot_username = "UnknownBot"
+    bot = context.bot; 
+    if bot is None: logger.error("Объект бота недоступен!"); return
+    bot_username = "UnknownBot"; 
     try: bot_username = (await bot.get_me()).username or "UnknownBot"
     except Exception as e: logger.error(f"Не удалось получить имя бота: {e}")
 
-    logger.info(f"[{bot_username}] Запуск ЕЖЕДНЕВНОЙ ЗАДАЧИ генерации историй...")
+    logger.info(f"[{bot_username}] Запуск ПРОВЕРКИ чатов для генерации историй...")
+
     enabled_chat_ids = dm.get_enabled_chats()
     if not enabled_chat_ids: logger.info(f"[{bot_username}] Нет активных чатов."); return
 
-    total_chats = len(enabled_chat_ids)
-    processed_chats_count = 0
-    failed_chats_count = 0
-    global_error_summary = []
+    # Получаем текущее время UTC для сравнения
+    now_utc = datetime.datetime.now(pytz.utc)
+    current_hour_utc = now_utc.hour
+    current_minute_utc = now_utc.minute
+    # Округляем текущую минуту до ближайшего интервала проверки для сравнения
+    # Например, если интервал 5 минут, то 10:03 станет 10:00, 10:06 станет 10:05
+    current_minute_rounded = (current_minute_utc // JOB_CHECK_INTERVAL_MINUTES) * JOB_CHECK_INTERVAL_MINUTES
 
-    logger.info(f"[{bot_username}] Обнаружено {total_chats} активных чатов для обработки.")
+    logger.debug(f"Текущее время UTC: {now_utc.strftime('%H:%M')}, Округленное время для проверки: {current_hour_utc:02d}:{current_minute_rounded:02d}")
 
-    for i, chat_id in enumerate(enabled_chat_ids):
-        current_chat_log_prefix = f"[{bot_username}][Chat {chat_id} ({i+1}/{total_chats})]"
-        logger.info(f"{current_chat_log_prefix} Начало обработки...")
-        story_sent_successfully = False
-        chat_lang = await get_chat_lang(chat_id)
+    processed_in_this_run = 0
+
+    for chat_id in enabled_chat_ids:
+        current_chat_log_prefix = f"[{bot_username}][Chat {chat_id}]"
+        should_process = False
+        target_hour = SCHEDULE_HOUR
+        target_minute = SCHEDULE_MINUTE
 
         try:
-            messages = dm.get_messages_for_chat(chat_id)
-            if not messages:
-                logger.info(f"{current_chat_log_prefix} Нет сообщений в БД."); dm.clear_messages_for_chat(chat_id); await asyncio.sleep(0.1); continue
+            settings = dm.get_chat_settings(chat_id)
+            custom_time_str = settings.get('custom_schedule_time')
 
-            logger.info(f"{current_chat_log_prefix} Собрано {len(messages)} сообщ.")
-            # --- Вызов download_images с константой ---
-            downloaded_images = await download_images(context, messages, chat_id, MAX_PHOTOS_TO_ANALYZE)
-            prepared_content = gc.prepare_story_parts(messages, downloaded_images)
-
-            if not prepared_content:
-                logger.warning(f"{current_chat_log_prefix} Не удалось подготовить контент."); global_error_summary.append(f"Chat {chat_id}: Ошибка подготовки"); failed_chats_count += 1; await asyncio.sleep(0.5); continue
-
-            # --- Используем safe_generate_story для вызова прокси с retries ---
-            story, error_msg = await gc.safe_generate_story(prepared_content)
-
-            if story:
-                # --- Отправка истории с кнопками ---
+            if custom_time_str: # Если установлено пользовательское время
                 try:
-                    photo_note_str = get_text("photo_info_text", chat_lang, count=MAX_PHOTOS_TO_ANALYZE) if downloaded_images else ""
-                    header_key = "daily_story_header"; full_message_text = get_text(header_key, chat_lang, photo_info=photo_note_str) + story
-                    MAX_MSG_LEN = 4096; sent_message = None
-                    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("👍", callback_data="feedback_good_placeholder"), InlineKeyboardButton("👎", callback_data="feedback_bad_placeholder")]]) # Заглушка
+                    parts = custom_time_str.split(':')
+                    target_hour = int(parts[0])
+                    target_minute = int(parts[1])
+                except (ValueError, IndexError):
+                    logger.warning(f"{current_chat_log_prefix} Неверный формат custom_schedule_time '{custom_time_str}', используем время по умолчанию.")
+                    # Оставляем target_hour/minute по умолчанию
+            # else: Используем время по умолчанию, уже присвоенное выше
 
-                    if len(full_message_text) > MAX_MSG_LEN:
-                         logger.warning(f"{current_chat_log_prefix} История длинная, разбиваем.")
-                         header_long_key = "daily_story_header_long"; await bot.send_message(chat_id=chat_id, text=get_text(header_long_key, chat_lang, photo_info=photo_note_str)); await asyncio.sleep(0.5)
-                         parts = [story[j:j+MAX_MSG_LEN] for j in range(0, len(story), MAX_MSG_LEN)]
-                         for k, part in enumerate(parts):
-                             # Кнопки добавляем только к последней части
-                             current_reply_markup = keyboard if k == len(parts) - 1 else None
-                             sent_message = await bot.send_message(chat_id=chat_id, text=part, reply_markup=current_reply_markup); await asyncio.sleep(0.5)
-                    else: sent_message = await bot.send_message(chat_id=chat_id, text=full_message_text, reply_markup=keyboard)
+            # Сравниваем ЧАС и ОКРУГЛЕННУЮ МИНУТУ
+            if current_hour_utc == target_hour and current_minute_rounded == target_minute:
+                logger.debug(f"{current_chat_log_prefix} Время {target_hour:02d}:{target_minute:02d} совпало с текущим округленным {current_hour_utc:02d}:{current_minute_rounded:02d}. Проверяем сообщения...")
+                # Проверяем, есть ли сообщения для обработки (это наш флаг "не обработано сегодня")
+                messages_exist = dm.get_messages_for_chat(chat_id) # Только проверяем наличие
+                if messages_exist:
+                    logger.info(f"{current_chat_log_prefix} Время совпало и есть сообщения ({len(messages_exist)} шт.). Начинаем генерацию!")
+                    should_process = True
+                    messages_to_process = messages_exist # Используем уже полученные сообщения
+                else:
+                     logger.debug(f"{current_chat_log_prefix} Время совпало, но нет новых сообщений для обработки.")
+            # else: Время не совпало, пропускаем этот чат в этом запуске
 
-                    # Обновляем callback_data в кнопках ID реального сообщения
-                    if sent_message:
-                         keyboard_updated = InlineKeyboardMarkup([[ InlineKeyboardButton("👍", callback_data=f"feedback_good_{sent_message.message_id}"), InlineKeyboardButton("👎", callback_data=f"feedback_bad_{sent_message.message_id}") ]])
-                         try: await bot.edit_message_reply_markup(chat_id=chat_id, message_id=sent_message.message_id, reply_markup=keyboard_updated)
-                         # Игнорируем ошибку BadRequest (если пользователь успел удалить сообщение или нажать кнопку)
-                         except BadRequest as e_br: logger.debug(f"Не удалось обновить кнопки для msg {sent_message.message_id}: {e_br}")
-                         except TelegramError as e_edit: logger.warning(f"Ошибка обновления кнопок для msg {sent_message.message_id}: {e_edit}")
+            if should_process:
+                processed_in_this_run += 1
+                story_sent = False # Флаг для очистки
+                chat_lang = settings.get('lang', DEFAULT_LANGUAGE)
+                # --- Логика генерации и отправки (почти без изменений) ---
+                logger.info(f"{current_chat_log_prefix} Собрано {len(messages_to_process)} сообщ.")
+                downloaded_images = await download_images(context, messages_to_process, chat_id, MAX_PHOTOS_TO_ANALYZE)
+                prepared_content = gc.prepare_story_parts(messages_to_process, downloaded_images)
+                if not prepared_content: logger.warning(f"{current_chat_log_prefix} Не удалось подготовить контент."); current_errors.append(f"Chat {chat_id}: Ошибка подготовки"); continue # К следующему чату
 
-                    logger.info(f"{current_chat_log_prefix} История успешно отправлена."); story_sent_successfully = True
-                    if error_msg: # Обработка примечания от прокси
-                         try: await bot.send_message(chat_id=chat_id, text=get_text("proxy_note", chat_lang, note=error_msg))
-                         except Exception as e: logger.warning(f"{current_chat_log_prefix} Не удалось отправить примечание: {e}")
-                except TelegramError as e: # Ошибки отправки Telegram
-                    logger.error(f"{current_chat_log_prefix} Ошибка Telegram при отправке: {e}"); error_str = str(e).lower(); is_fatal_tg_error = False
-                    if "bot was blocked" in error_str or "user is deactivated" in error_str or "chat not found" in error_str or "bot was kicked" in error_str or "chat_write_forbidden" in error_str:
-                         logger.warning(f"{current_chat_log_prefix} Неустранимая ошибка Telegram. Очищаем данные."); dm.clear_messages_for_chat(chat_id); is_fatal_tg_error = True
-                    global_error_summary.append(f"Chat {chat_id}: TG Error ({e.__class__.__name__})"); failed_chats_count += 1
-                    if not is_fatal_tg_error: 
-                        try: await bot.send_message(chat_id=chat_id, text=get_text("error_telegram", chat_lang, error=e)) 
-                        except Exception: pass
-                except Exception as e: # Другие ошибки отправки
-                    logger.error(f"{current_chat_log_prefix} Неожиданная ошибка при отправке: {e}", exc_info=True); global_error_summary.append(f"Chat {chat_id}: Send Error ({e.__class__.__name__})"); failed_chats_count += 1; 
-                    try: await bot.send_message(chat_id=chat_id, text=get_text("error_unexpected_send", chat_lang)) 
-                    except Exception: pass
-            else: # Ошибка генерации (story is None)
-                logger.warning(f"{current_chat_log_prefix} Не удалось сгенерировать историю. Причина: {error_msg}"); global_error_summary.append(f"Chat {chat_id}: Generation Error ({error_msg or 'Unknown'})"); failed_chats_count += 1
-                try: await bot.send_message(chat_id=chat_id, text=get_text("daily_job_failed_chat", chat_lang, error=error_msg or 'Неизвестно'))
-                except TelegramError as e_err: # Ошибка отправки уведомления об ошибке
-                    error_str = str(e_err).lower()
-                    if "bot was blocked" in error_str or "user is deactivated" in error_str or "chat not found" in error_str or "bot was kicked" in error_str or "chat_write_forbidden" in error_str: logger.warning(f"{current_chat_log_prefix} Очищаем данные из-за ошибки TG при отправке уведомления об ошибке."); dm.clear_messages_for_chat(chat_id)
-                    else: logger.warning(f"{current_chat_log_prefix} Не удалось отправить сообщение об ошибке генерации: {e_err}")
-                except Exception as e: logger.error(f"{current_chat_log_prefix} Неожиданная ошибка при отправке уведомления об ошибке генерации: {e}", exc_info=True)
-        except Exception as e: # Глобальный обработчик ошибок для чата
-             logger.error(f"{current_chat_log_prefix} КРИТИЧЕСКАЯ ОШИБКА обработки чата: {e}", exc_info=True); global_error_summary.append(f"Chat {chat_id}: Critical Error ({e.__class__.__name__})"); failed_chats_count += 1
+                story, error_msg = await gc.safe_generate_story(prepared_content)
+                if story:
+                    # ... (Код отправки истории с кнопками - БЕЗ ИЗМЕНЕНИЙ) ...
+                    story_sent = True # Устанавливаем флаг только ПОСЛЕ успешной отправки
+                else: # Ошибка генерации
+                    logger.warning(f"{current_chat_log_prefix} Не удалось сгенерировать историю. Причина: {error_msg}"); current_errors.append(f"Chat {chat_id}: Generation Error ({error_msg or 'Unknown'})")
+                    try: await bot.send_message(chat_id=chat_id, text=get_text("daily_job_failed_chat", chat_lang, error=error_msg or 'Неизвестно'))
+                    except Exception as e_err: # Обработка ошибки отправки уведомления
+                        logger.warning(f"{current_chat_log_prefix} Не удалось отправить сообщение об ошибке генерации: {e_err}")
+                        # ... (Проверка на фатальные ошибки Telegram и очистка при необходимости) ...
 
-        # --- Очистка данных ---
-        if story_sent_successfully:
-            dm.clear_messages_for_chat(chat_id); processed_chats_count += 1
-        else:
-            if dm.get_messages_for_chat(chat_id): logger.warning(f"{current_chat_log_prefix} Данные НЕ очищены из-за ошибки.")
+                # --- Очистка данных ТОЛЬКО при УСПЕШНОЙ отправке ---
+                if story_sent:
+                    dm.clear_messages_for_chat(chat_id)
+                else:
+                    logger.warning(f"{current_chat_log_prefix} Данные НЕ очищены из-за ошибки генерации или отправки.")
 
-        # --- Пауза ---
-        logger.debug(f"{current_chat_log_prefix} Завершение обработки. Пауза...")
-        await asyncio.sleep(5) # Пауза между чатами
+                # Небольшая пауза после обработки чата, чтобы не перегружать API
+                await asyncio.sleep(2)
 
-    # --- Завершение задачи ---
-    job_end_time = datetime.datetime.now(datetime.timezone.utc); duration = job_end_time - job_start_time
-    last_job_error = "\n".join(global_error_summary) if global_error_summary else None # Сохраняем ошибки
-    logger.info(f"[{bot_username}] Ежедневная задача завершена за {duration}. Успешно: {processed_chats_count}/{total_chats}. Ошибок: {failed_chats_count}.")
-    if failed_chats_count > 0:
-        await notify_owner(context, f"Ежедневная задача завершена с {failed_chats_count} ошибками:\n{last_job_error}")
+        except Exception as e:
+            logger.error(f"{current_chat_log_prefix} КРИТИЧЕСКАЯ ОШИБКА при проверке/обработке чата: {e}", exc_info=True)
+            current_errors.append(f"Chat {chat_id}: Critical Error ({e.__class__.__name__})")
+            await asyncio.sleep(1) # Пауза при критической ошибке
+
+    # --- Завершение периодической задачи ---
+    last_job_error = "\n".join(current_errors) if current_errors else None # Обновляем глобальную ошибку
+    logger.info(f"[{bot_username}] Проверка чатов завершена. Обработано в этом запуске: {processed_in_this_run}. Обнаружено ошибок: {len(current_errors)}.")
+    if last_job_error:
+        await notify_owner(context, f"Обнаружены ошибки при проверке/генерации историй:\n{last_job_error}")

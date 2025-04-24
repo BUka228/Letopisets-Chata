@@ -2,6 +2,7 @@ import logging
 import datetime
 import asyncio
 import time
+import re
 from typing import Optional
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, constants as tg_constants
 from telegram.ext import (
@@ -61,28 +62,22 @@ async def is_user_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAUL
 # --- Обработчики команд ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /start. Устанавливает меню команд."""
     user = update.effective_user; chat = update.effective_chat
     if not user or not chat: return
 
     chat_lang = await get_chat_lang(chat.id)
-    settings = dm.get_chat_settings(chat.id) # Получаем статус enabled
-    status_text = get_text("settings_enabled", chat_lang) if settings.get('enabled', True) else get_text("settings_disabled", chat_lang)
+    settings = dm.get_chat_settings(chat.id)
+    status_key = "settings_enabled" if settings.get('enabled', True) else "settings_disabled"
+    status_text = get_text(status_key, chat_lang).split(': ')[-1]
 
-    logger.info(f"User {user.id} started bot in chat {chat.id}")
+    logger.info(f"User {user.id} ({user.username}) started bot in chat {chat.id} ({getattr(chat, 'title', 'Private')})")
     await update.message.reply_html(
-        get_text("start_message", chat_lang,
-                 user_mention=user.mention_html(),
-                 chat_title=f"'{chat.title}'" if chat.title else get_text('private_chat', chat_lang), # Уточняем для личных чатов
-                 schedule_time=f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}",
-                 schedule_tz=SCHEDULE_TIMEZONE_STR,
-                 status=status_text.split(': ')[1] # Берем только статус
-                 ),
-        # Добавляем кнопку выбора языка
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🌐 Language / Язык", callback_data="select_language")
-        ]])
+        get_text("start_message", chat_lang, user_mention=user.mention_html(), chat_title=f"'{chat.title}'" if chat.title else get_text('private_chat', chat_lang), schedule_time=f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}", schedule_tz=SCHEDULE_TIMEZONE_STR, status=status_text),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Language / Язык", callback_data="select_language")]])
     )
-    commands = [
+    # --- ИЗМЕНЕНО: Добавляем команду /set_story_time в список ---
+    commands_to_set = [
         BotCommand("start", get_text("cmd_start_desc", chat_lang)),
         BotCommand("help", get_text("cmd_help_desc", chat_lang)),
         BotCommand("generate_now", get_text("cmd_generate_now_desc", chat_lang)),
@@ -90,15 +85,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         BotCommand("story_on", get_text("cmd_story_on_desc", chat_lang)),
         BotCommand("story_off", get_text("cmd_story_off_desc", chat_lang)),
         BotCommand("story_settings", get_text("cmd_settings_desc", chat_lang)),
+        BotCommand("set_story_time", get_text("cmd_set_story_time_desc", chat_lang)), 
         BotCommand("set_language", get_text("cmd_language_desc", chat_lang)),
     ]
-    # Добавляем команду /status только для владельца
-    if user.id == BOT_OWNER_ID:
-         commands.append(BotCommand("status", get_text("cmd_status_desc", chat_lang)))
-    try:
-        await context.bot.set_my_commands(commands) #, language_code=chat_lang[:2] if chat_lang else None) # Можно задать язык для команд
-    except TelegramError as e:
-        logger.warning(f"Failed to set bot commands for chat {chat.id}: {e}")
+    # --------------------------------------------------------
+    if user.id == BOT_OWNER_ID: commands_to_set.append(BotCommand("status", get_text("cmd_status_desc", chat_lang)))
+    try: await context.bot.set_my_commands(commands_to_set)
+    except TelegramError as e: logger.warning(f"Failed to set bot commands for chat {chat.id}: {e}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat; user = update.effective_user
@@ -259,8 +252,34 @@ async def story_on_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(reply_text)
 
 async def story_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает настройки для чата (только админы)."""
+    """Показывает настройки для чата, включая время."""
     user = update.effective_user; chat = update.effective_chat
+    if not user or not chat or chat.type == tg_constants.ChatType.PRIVATE: return
+    chat_lang = await get_chat_lang(chat.id)
+    is_admin = await is_user_admin(chat.id, user.id, context)
+    if not is_admin: await update.message.reply_text(get_text("admin_only", chat_lang)); return
+
+    settings = dm.get_chat_settings(chat.id)
+    status_text = get_text("settings_enabled", chat_lang) if settings.get('enabled', True) else get_text("settings_disabled", chat_lang)
+    lang_text = get_text("settings_language", chat_lang) + f" ({settings.get('lang', DEFAULT_LANGUAGE)})"
+    # --- НОВОЕ: Отображение времени ---
+    custom_time = settings.get('custom_schedule_time')
+    if custom_time:
+        time_text = get_text("settings_custom_time", chat_lang, custom_time=custom_time)
+    else:
+        time_text = get_text("settings_default_time", chat_lang, default_hh=f"{SCHEDULE_HOUR:02d}", default_mm=f"{SCHEDULE_MINUTE:02d}")
+    # ---------------------------------
+    await update.message.reply_text(
+        f"{get_text('settings_title', chat_lang, chat_title=chat.title)}\n"
+        f"- {status_text}\n"
+        f"- {lang_text}\n"
+        f"- {time_text}" # Добавили строку времени
+    )
+
+# --- НОВАЯ КОМАНДА: /set_story_time ---
+async def set_story_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Устанавливает пользовательское время генерации истории (Админ)."""
+    user = update.effective_user; chat = update.effective_chat; args = context.args
     if not user or not chat or chat.type == tg_constants.ChatType.PRIVATE: return
     chat_lang = await get_chat_lang(chat.id)
 
@@ -269,15 +288,41 @@ async def story_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(get_text("admin_only", chat_lang))
         return
 
-    settings = dm.get_chat_settings(chat.id)
-    status_text = get_text("settings_enabled", chat_lang) if settings.get('enabled', True) else get_text("settings_disabled", chat_lang)
-    lang_text = get_text("settings_language", chat_lang) + f" ({settings.get('lang', DEFAULT_LANGUAGE)})"
+    # Проверяем наличие аргумента
+    if not args:
+        await update.message.reply_markdown_v2(
+            get_text("set_time_prompt", chat_lang, default_hh=f"{SCHEDULE_HOUR:02d}", default_mm=f"{SCHEDULE_MINUTE:02d}").replace('*','\\*') # Экранируем Markdown
+        )
+        return
 
-    await update.message.reply_text(
-        f"{get_text('settings_title', chat_lang, chat_title=chat.title)}\n"
-        f"- {status_text}\n"
-        f"- {lang_text}"
-    )
+    new_time_str = args[0].lower()
+    value_to_save: Optional[str] = None # Значение для сохранения в БД
+
+    if new_time_str == "default" or new_time_str == "clear":
+        value_to_save = None # Сбрасываем на NULL
+        success = dm.update_chat_setting(chat.id, 'custom_schedule_time', value_to_save)
+        if success:
+            await update.message.reply_markdown_v2(
+                get_text("set_time_default_success", chat_lang, default_hh=f"{SCHEDULE_HOUR:02d}", default_mm=f"{SCHEDULE_MINUTE:02d}").replace('*','\\*')
+            )
+        else:
+            await update.message.reply_text(get_text("error_db_generic", chat_lang))
+        return
+
+    # Валидация формата HH:MM
+    if re.fullmatch(r"^(?:[01]\d|2[0-3]):[0-5]\d$", new_time_str):
+        value_to_save = new_time_str
+        success = dm.update_chat_setting(chat.id, 'custom_schedule_time', value_to_save)
+        if success:
+            await update.message.reply_markdown_v2(
+                get_text("set_time_success", chat_lang, new_time=value_to_save).replace('*','\\*')
+            )
+        else:
+            await update.message.reply_text(get_text("error_db_generic", chat_lang))
+    else:
+        await update.message.reply_markdown_v2(
+             get_text("set_time_invalid_format", chat_lang).replace('*','\\*')
+        )
 
 async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Предлагает выбрать язык."""
