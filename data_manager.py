@@ -94,7 +94,8 @@ def _init_db():
                 chat_id INTEGER PRIMARY KEY,
                 lang TEXT DEFAULT '{DEFAULT_LANGUAGE}',
                 enabled BOOLEAN DEFAULT 1,
-                custom_schedule_time TEXT DEFAULT NULL -- Время HH:MM UTC или NULL
+                custom_schedule_time TEXT DEFAULT NULL, -- Время HH:MM UTC или NULL
+                timezone TEXT DEFAULT 'UTC' -- pytz Timezone Name
             )
         """)
         # Обновление таблицы, если поле еще не существует

@@ -24,7 +24,6 @@ import data_manager as dm
 import gemini_client as gc
 from jobs import (
     download_images, MAX_PHOTOS_TO_ANALYZE, notify_owner,
-    last_job_run_time, last_job_error # Импортируем статусы из main.py теперь
 )
 from config import (
     SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_TIMEZONE_STR, BOT_OWNER_ID,
