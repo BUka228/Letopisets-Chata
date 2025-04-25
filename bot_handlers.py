@@ -6,7 +6,7 @@ import time
 import re
 import pytz
 from typing import Optional, Dict, Any, Tuple
-
+from utils import download_images, MAX_PHOTOS_TO_ANALYZE, notify_owner
 # Импорты из Telegram
 from telegram import (
     Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup,
