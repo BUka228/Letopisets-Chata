@@ -71,7 +71,7 @@ LOCALIZED_TEXTS: Dict[str, Dict[str, str]] = {
         "settings_time_label": "Время генерации",
         "settings_timezone_label": "Часовой пояс",
         "settings_time_custom": "{custom_time} (ваше)",
-        "settings_time_default": "~{default_time} (стандарт)", # Используем отформатированное время
+        "settings_default_time": "Время генерации: ~{default_hh}:{default_mm} (стандартное)",
         "settings_button_status_on": "❌ Выключить истории",
         "settings_button_status_off": "✅ Включить истории",
         "settings_button_language": "🌐 Сменить язык",
@@ -82,10 +82,22 @@ LOCALIZED_TEXTS: Dict[str, Dict[str, str]] = {
         # --- Диалог установки времени ---
         "set_time_cancel": "Отмена",
         "set_time_cancelled": "Установка времени отменена.",
-        "set_time_prompt_conv": "⏰ Введите желаемое время генерации в формате <b>HH:MM</b> (UTC, 24ч) или /cancel.",
-        "set_time_invalid_format_conv": "❌ Неверный формат. Введите время как <b>HH:MM</b> (например, <code>09:00</code>) или /cancel.",
-        "set_time_success_conv": "✅ Время генерации (UTC) установлено на <b>{new_time}</b>.",
-        "set_time_default_success_conv": "✅ Время генерации сброшено на стандартное (<b>~{default_hh}:{default_mm} UTC</b>).",
+        "set_time_prompt_conv": (
+            "⏰ Введите желаемое время генерации в формате <b>HH:MM</b> (24ч) "
+            "для вашего часового пояса (<b>{chat_timezone}</b>).\n"
+            "<i>Бот запомнит его в UTC.</i>\n"
+            "Или отправьте /cancel для отмены."
+        ),
+        "set_time_invalid_format_conv": (
+            "❌ Неверный формат. Введите время как <b>HH:MM</b> "
+            "(например, <code>09:00</code> или <code>23:55</code> для пояса <b>{chat_timezone}</b>) "
+            "или /cancel."
+        ),
+        "set_time_success_conv": (
+            "✅ Время генерации установлено на <b>{input_time} {chat_timezone_short}</b> "
+            "(это {utc_time} UTC)." # Показываем и введенное, и UTC
+        ),
+        "set_time_default_success_conv": "✅ Время генерации сброшено на стандартное (~<b>{local_default_time}</b>).",
         "set_time_reset_button": "⏰ Сбросить на стандартное", # Текст для кнопки сброса
 
         # --- Диалог выбора языка ---
@@ -176,6 +188,7 @@ I analyze text and photos from the day and create a unique story using AI.
         "settings_time_label": "Generation Time",
         "settings_timezone_label": "Timezone",
         "settings_time_custom": "{custom_time} (custom)",
+        "settings_default_time": "Generation time: ~{default_hh}:{default_mm} (default)",
         "settings_time_default": "~{default_time} (default)",
         "settings_button_status_on": "❌ Disable stories",
         "settings_button_status_off": "✅ Enable stories",
@@ -187,10 +200,22 @@ I analyze text and photos from the day and create a unique story using AI.
         # --- Диалог установки времени ---
         "set_time_cancel": "Cancel",
         "set_time_cancelled": "Set time cancelled.",
-        "set_time_prompt_conv": "⏰ Enter the desired generation time in <b>HH:MM</b> format (UTC, 24h) or send /cancel.",
-        "set_time_invalid_format_conv": "❌ Invalid format. Enter time as <b>HH:MM</b> (e.g., <code>09:00</code>) or /cancel.",
-        "set_time_success_conv": "✅ Generation time (UTC) set to <b>{new_time}</b>.",
-        "set_time_default_success_conv": "✅ Generation time reset to default (<b>~{default_hh}:{default_mm} UTC</b>).",
+        "set_time_prompt_conv": (
+            "⏰ Enter the desired generation time in <b>HH:MM</b> format (24h) "
+            "for your timezone (<b>{chat_timezone}</b>).\n"
+            "<i>The bot will store it in UTC.</i>\n"
+            "Or send /cancel to cancel."
+        ),
+        "set_time_invalid_format_conv": (
+            "❌ Invalid format. Enter time as <b>HH:MM</b> "
+            "(e.g., <code>09:00</code> or <code>23:55</code> for <b>{chat_timezone}</b>) "
+            "or /cancel."
+        ),
+        "set_time_success_conv": (
+            "✅ Generation time set to <b>{input_time} {chat_timezone_short}</b> "
+            "(which is {utc_time} UTC)." # Show both input and UTC
+        ),
+        "set_time_default_success_conv": "✅ Generation time reset to default (~<b>{local_default_time}</b>).",
         "set_time_reset_button": "⏰ Reset to Default",
 
         # --- Диалог выбора языка ---

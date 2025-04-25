@@ -117,7 +117,11 @@ async def get_settings_text_and_markup(chat_id: int, chat_title: Optional[str]) 
              time_text = f"{custom_time_utc_str} UTC (неверный формат!)"
     else:
         local_time_str = format_time_for_chat(SCHEDULE_HOUR, SCHEDULE_MINUTE, chat_tz_str)
-        time_text = get_text("settings_default_time", chat_lang, default_time=local_time_str) + f" (~{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} UTC)"
+        time_text = get_text(
+            "settings_default_time", chat_lang,
+            default_hh=f"{SCHEDULE_HOUR:02d}",
+            default_mm=f"{SCHEDULE_MINUTE:02d}"
+        ) + f" (UTC)" # Добавляем UTC явно
     # -----------------------------------------------------------
 
     # --- НОВОЕ: Отображаем текущую таймзону ---
@@ -606,12 +610,12 @@ async def set_language_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 # --- Диалог установки времени ---
 async def ask_set_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Начинает диалог установки времени (entry point)."""
+    """Начинает диалог установки времени."""
     query = update.callback_query
     if not query or not query.message: return ConversationHandler.END
     user = query.from_user; chat = query.message.chat
     if not user or not chat: return ConversationHandler.END
-    context.user_data['conv_type'] = 'time' # Помечаем тип диалога
+    context.user_data['conv_type'] = 'time'
     await query.answer()
     chat_lang = await get_chat_lang(chat.id)
 
@@ -620,66 +624,110 @@ async def ask_set_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> st
         await query.edit_message_text(get_text("admin_only", chat_lang), reply_markup=None)
         return ConversationHandler.END
 
-    # Кнопки для сброса и отмены
+    # Получаем текущую таймзону чата для отображения в сообщении
+    chat_tz_str = dm.get_chat_timezone(chat.id)
+    tz_display_name = COMMON_TIMEZONES.get(chat_tz_str, chat_tz_str)
+    
+    default_time_text_for_button = get_text(
+        "settings_default_time", chat_lang, # Правильный ключ
+        default_hh=f"{SCHEDULE_HOUR:02d}",   # Правильный аргумент
+        default_mm=f"{SCHEDULE_MINUTE:02d}"  # Правильный аргумент
+    ).split(': ')[-1] # Берем только само время " HH:MM (стандартное)"
+    
+
     keyboard = [
-        [InlineKeyboardButton("⏰ " + get_text("settings_time_default", chat_lang, default_hh=f"{SCHEDULE_HOUR:02d}", default_mm=f"{SCHEDULE_MINUTE:02d}").split(': ')[-1], callback_data=CB_SET_TIME_DEFAULT)], # Кнопка сброса
-        [InlineKeyboardButton("🚫 " + get_text("set_time_cancel", chat_lang), callback_data=CB_CANCEL_CONV)] # Общая кнопка отмены
+        [InlineKeyboardButton(f"⏰ {default_time_text_for_button}", callback_data=CB_SET_TIME_DEFAULT)],
+        [InlineKeyboardButton("🚫 " + get_text("set_time_cancel", chat_lang), callback_data=CB_CANCEL_CONV)]
     ]
     await query.edit_message_text(
-        get_text("set_time_prompt_conv", chat_lang),
+        # Передаем имя таймзоны в текст приглашения
+        get_text("set_time_prompt_conv", chat_lang, chat_timezone=tz_display_name),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    return AWAITING_TIME # Переходим в состояние ожидания времени
+    return AWAITING_TIME
 
 async def set_time_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обрабатывает введенное пользователем время."""
+    """Обрабатывает введенное время, конвертирует в UTC и сохраняет."""
     user = update.effective_user; chat = update.effective_chat
     if not user or not chat or not update.message or not update.message.text:
-        return AWAITING_TIME # Остаемся ждать, если нет сообщения
-
-    chat_lang = await get_chat_lang(chat.id)
-    new_time_str = update.message.text.strip()
-
-    if re.fullmatch(r"^(?:[01]\d|2[0-3]):[0-5]\d$", new_time_str):
-        success = dm.update_chat_setting(chat.id, 'custom_schedule_time', new_time_str)
-        if success:
-            text = get_text("set_time_success_conv", chat_lang, new_time=new_time_str)
-        else:
-            text = get_text("error_db_generic", chat_lang)
-        await update.message.reply_html(text)
-        context.user_data.pop('conv_type', None) # Очищаем состояние
-        # Обновляем сообщение с настройками (если оно еще доступно)
-        # Это не очень надежно, т.к. пользователь мог удалить его.
-        # Лучше просто вывести подтверждение.
-        # if 'settings_message_id' in context.chat_data:
-        #    await display_settings(update, context, chat.id, context.chat_data['settings_message_id'])
-        return ConversationHandler.END # Завершаем диалог
-    else:
-        # Отправляем сообщение об ошибке и остаемся в том же состоянии
-        await update.message.reply_html(get_text("set_time_invalid_format_conv", chat_lang))
         return AWAITING_TIME
 
+    chat_lang = await get_chat_lang(chat.id)
+    chat_tz_str = dm.get_chat_timezone(chat.id)
+    tz_display_name = COMMON_TIMEZONES.get(chat_tz_str, chat_tz_str)
+    input_time_str = update.message.text.strip() # Время, введенное пользователем
+
+    if not re.fullmatch(r"^(?:[01]\d|2[0-3]):[0-5]\d$", input_time_str):
+        await update.message.reply_html(
+            get_text("set_time_invalid_format_conv", chat_lang, chat_timezone=tz_display_name)
+        )
+        return AWAITING_TIME # Остаемся ждать корректного ввода
+
+    utc_time_to_save = None
+    tz_short_name = chat_tz_str # Fallback для короткого имени таймзоны
+    try:
+        hour_local, minute_local = map(int, input_time_str.split(':'))
+        local_tz = pytz.timezone(chat_tz_str)
+        now_local_naive = datetime.datetime.now()
+        time_local_naive = now_local_naive.replace(hour=hour_local, minute=minute_local, second=0, microsecond=0)
+        time_local_aware = local_tz.localize(time_local_naive, is_dst=None)
+        time_utc = time_local_aware.astimezone(pytz.utc)
+        utc_time_to_save = time_utc.strftime("%H:%M")
+        tz_short_name = time_local_aware.strftime('%Z') # Получаем краткое имя TZ
+        logger.info(
+            f"Chat {chat.id}: User input {input_time_str} ({chat_tz_str}/{tz_short_name}) "
+            f"converted to {utc_time_to_save} UTC for saving."
+        )
+    except Exception as e:
+        logger.error(f"Error converting time for chat {chat.id}: Input='{input_time_str}', TZ='{chat_tz_str}'. Error: {e}", exc_info=True)
+        await update.message.reply_html(get_text("error_db_generic", chat_lang))
+        return AWAITING_TIME # Остаемся ждать на всякий случай
+
+    # --- Сохранение времени UTC в БД ---
+    success = dm.update_chat_setting(chat.id, 'custom_schedule_time', utc_time_to_save)
+
+    # --- ИСПРАВЛЕНО: Передаем правильные аргументы в get_text ---
+    if success:
+        text = get_text(
+            "set_time_success_conv", chat_lang,
+            input_time=input_time_str,        # Используем input_time_str
+            chat_timezone_short=tz_short_name,# Используем tz_short_name
+            utc_time=utc_time_to_save         # Используем utc_time_to_save
+        )
+    else:
+        text = get_text("error_db_generic", chat_lang)
+    # ---------------------------------------------------------
+
+    await update.message.reply_html(text)
+    context.user_data.pop('conv_type', None)
+    return ConversationHandler.END
+
 async def set_time_default_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обрабатывает нажатие кнопки 'Сбросить на стандартное'."""
+    """Обрабатывает сброс на время по умолчанию."""
     query = update.callback_query
     if not query or not query.message: return ConversationHandler.END
     await query.answer()
     user = query.from_user; chat = query.message.chat
     if not user or not chat: return ConversationHandler.END
+
     chat_lang = await get_chat_lang(chat.id)
+    # Получаем таймзону чата, чтобы показать время по умолчанию в ней
+    chat_tz_str = dm.get_chat_timezone(chat.id)
+    local_default_time_str = format_time_for_chat(SCHEDULE_HOUR, SCHEDULE_MINUTE, chat_tz_str)
 
     success = dm.update_chat_setting(chat.id, 'custom_schedule_time', None) # Сбрасываем время
+
     if success:
         text = get_text(
             "set_time_default_success_conv", chat_lang,
-            default_hh=f"{SCHEDULE_HOUR:02d}", default_mm=f"{SCHEDULE_MINUTE:02d}"
+            local_default_time=local_default_time_str # Показываем локальное время по умолчанию
         )
     else:
         text = get_text("error_db_generic", chat_lang)
 
     await query.edit_message_text(text=text, reply_markup=None, parse_mode=ParseMode.HTML)
-    context.user_data.pop('conv_type', None) # Очищаем состояние
+    context.user_data.pop('conv_type', None)
     return ConversationHandler.END
 
 # --- Общая функция отмены диалога ---
