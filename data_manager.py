@@ -457,21 +457,49 @@ def get_intervention_settings(chat_id: int) -> Dict[str, Any]: # Без изме
     settings = get_chat_settings(chat_id); return {'allow_interventions': settings.get('allow_interventions', INTERVENTION_ENABLED_DEFAULT), 'last_intervention_ts': settings.get('last_intervention_ts', 0), 'cooldown_minutes': settings.get('intervention_cooldown_minutes') or INTERVENTION_DEFAULT_COOLDOWN_MIN, 'min_msgs': settings.get('intervention_min_msgs') or INTERVENTION_DEFAULT_MIN_MSGS, 'timespan_minutes': settings.get('intervention_timespan_minutes') or INTERVENTION_DEFAULT_TIMESPAN_MIN }
 
 # --- Функция Статистики (без изменений) ---
-def get_chat_stats(chat_id: int, since_datetime_utc: datetime.datetime) -> Dict[str, Any]:
-    stats={'active_users':0,'total_messages':0,'photos':0,'stickers':0,'top_users':[]}
-    if since_datetime_utc.tzinfo is None: since_datetime_utc=pytz.utc.localize(since_datetime_utc)
-    else: since_datetime_utc=since_datetime_utc.astimezone(pytz.utc)
-    since_iso=since_datetime_utc.isoformat(); params=(chat_id,since_iso)
-    try: # Counts
-        sql_c="SELECT message_type,COUNT(*)as count FROM messages WHERE chat_id=? AND timestamp>=? GROUP BY message_type"
-        rows_c=_execute_query(sql_c,params,fetch_all=True)
-        for r in rows_c: stats['total_messages']+=r['count']
-        if r['message_type']=='photo':stats['photos']=r['count']
-        elif r['message_type']=='sticker':stats['stickers']=r['count']
-        # Top Users
-        sql_t="SELECT username,COUNT(*)as msg_count FROM messages WHERE chat_id=? AND timestamp>=? GROUP BY user_id,username ORDER BY msg_count DESC LIMIT 3"
-        rows_t=_execute_query(sql_t,params,fetch_all=True); stats['top_users']=[(r['username'],r['msg_count'])for r in rows_t]; stats['active_users']=len(rows_t); logger.debug(f"Stats collected c={chat_id} since={since_iso}.")
-    except Exception: logger.exception(f"Failed get stats c={chat_id}"); return stats
+def get_chat_stats(chat_id: int, since_datetime_utc: datetime.datetime) -> Optional[Dict[str, Any]]: # <-- ИЗМЕНЕНО: Возвращаем Optional[Dict]
+    """Собирает статистику чата с указанного времени UTC. Возвращает None при ошибке."""
+    stats = {'active_users': 0, 'total_messages': 0, 'photos': 0, 'stickers': 0, 'top_users': []}
+    if since_datetime_utc.tzinfo is None: since_datetime_utc = pytz.utc.localize(since_datetime_utc)
+    else: since_datetime_utc = since_datetime_utc.astimezone(pytz.utc)
+    since_iso_str = since_datetime_utc.isoformat()
+    params = (chat_id, since_iso_str)
+    logger.debug(f"Собираю статистику для чата {chat_id} с {since_iso_str}") # <-- Лог начала
+
+    try:
+        # 1. Общее кол-во сообщений и типы
+        sql_counts = "SELECT message_type, COUNT(*) as count FROM messages WHERE chat_id = ? AND timestamp >= ? GROUP BY message_type"
+        rows_counts = _execute_query(sql_counts, params, fetch_all=True)
+        logger.debug(f"Stats query 1 (counts): Found {len(rows_counts) if rows_counts else '0'} rows.") # <-- Лог 1
+        if rows_counts: # Проверяем, что результат не None
+            for row in rows_counts:
+                stats['total_messages'] += row['count']
+                msg_type = row['message_type']
+                if msg_type == 'photo': stats['photos'] = row['count']
+                elif msg_type == 'sticker': stats['stickers'] = row['count']
+                # Добавить другие типы по желанию
+
+        # 2. Топ активных пользователей
+        sql_top_users = "SELECT username, COUNT(*) as msg_count FROM messages WHERE chat_id = ? AND timestamp >= ? GROUP BY user_id ORDER BY msg_count DESC LIMIT 3" # Group by user_id for count
+        rows_top = _execute_query(sql_top_users, params, fetch_all=True)
+        logger.debug(f"Stats query 2 (top users): Found {len(rows_top) if rows_top else '0'} rows.") # <-- Лог 2
+        if rows_top: # Проверяем, что результат не None
+            stats['top_users'] = [(row['username'], row['msg_count']) for row in rows_top]
+
+        # 3. Количество уникальных активных пользователей
+        sql_active_users = "SELECT COUNT(DISTINCT user_id) as unique_users FROM messages WHERE chat_id = ? AND timestamp >= ?"
+        active_users_row = _execute_query(sql_active_users, params, fetch_one=True)
+        logger.debug(f"Stats query 3 (active users): Found row - {bool(active_users_row)}") # <-- Лог 3
+        if active_users_row: # Проверяем, что результат не None
+            stats['active_users'] = active_users_row['unique_users']
+
+        logger.debug(f"Статистика для чата {chat_id} собрана: {stats}") # <-- Итоговый лог перед return
+        return stats
+
+    except Exception as e:
+        logger.exception(f"Ошибка сбора статистики чата {chat_id}")
+        # --- ИЗМЕНЕНО: Возвращаем None при любой ошибке внутри try ---
+        return None
 
 # --- add_feedback, close_all_connections (без изменений) ---
 def add_feedback(message_id: int, chat_id: int, user_id: int, rating: int):

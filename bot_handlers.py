@@ -364,35 +364,31 @@ async def story_settings_command(update: Update, context: ContextTypes.DEFAULT_T
 
 async def settings_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Единый обработчик ВСЕХ нажатий кнопок в меню настроек (префикс 'settings_').
-    Маршрутизирует действия на отображение подменю или на изменение настроек.
+    Единый обработчик ВСЕХ кнопок меню настроек (с префиксом 'settings_').
+    Маршрутизирует вызовы к соответствующим функциям отображения
+    или напрямую обновляет настройки.
     """
     query = update.callback_query
     if not query or not query.message: return
-    await query.answer() # Всегда отвечаем на колбэк для UX
+    await query.answer() # Ответ на колбек обязателен
 
-    user = query.from_user
-    chat = query.message.chat
+    user = query.from_user; chat = query.message.chat
     if not user or not chat: return # Необходимы пользователь и чат
-
-    # Основные переменные
-    chat_id = chat.id
-    user_id = user.id
-    message_id = query.message.message_id # Для редактирования сообщения
-    data = query.data
-    chat_lang = await get_chat_lang(chat_id) # Получаем текущий язык чата
-
+    chat_id = chat.id; user_id = user.id; message_id = query.message.message_id
+    data = query.data; chat_lang = await get_chat_lang(chat_id)
     logger.info(f"Settings CB: user={user_id} chat={chat_id} data='{data}' msg={message_id}")
 
-    # --- Проверка прав администратора ---
-    # Любое действие в настройках требует прав админа
+    # Проверка прав администратора перед любыми действиями
     if not await is_user_admin(chat_id, user_id, context):
         await query.answer(get_text("admin_only", chat_lang), show_alert=True)
         return
 
-    # --- Основная логика маршрутизации и обработки ---
     try:
-        # --- Навигация и Базовые Переключатели ---
+        # =============================================
+        # == Маршрутизация по основному действию ========
+        # =============================================
+
+        # --- Навигация и базовые переключатели ---
         if data == 'settings_main':
             context.user_data.pop(PENDING_TIME_INPUT_KEY, None) # Сброс ожидания ввода времени
             await _display_settings_main(update, context, chat_id, user_id)
@@ -400,24 +396,17 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
             context.user_data.pop(PENDING_TIME_INPUT_KEY, None)
             try:
                 await query.delete_message() # Удаляем сообщение настроек
-            except TelegramError as e:
-                logger.warning(f"Could not delete settings message on close: {e}")
-        elif data == 'settings_toggle_status': # Вкл/Выкл бота в чате
-            settings = dm.get_chat_settings(chat_id)
-            success = dm.update_chat_setting(chat_id, 'enabled', not settings.get('enabled', True))
-            if success:
-                await _display_settings_main(update, context, chat_id, user_id)
-                await query.answer(get_text("settings_saved_popup", chat_lang))
-            else: await query.answer(get_text("error_db_generic", chat_lang), show_alert=True)
-        elif data == 'settings_toggle_interventions': # Вкл/Выкл Вмешательств
-            settings = dm.get_chat_settings(chat_id)
-            success = dm.update_chat_setting(chat_id, 'allow_interventions', not settings.get('allow_interventions', False))
-            if success:
-                 await _display_settings_main(update, context, chat_id, user_id)
-                 await query.answer(get_text("settings_saved_popup", chat_lang))
-            else: await query.answer(get_text("error_db_generic", chat_lang), show_alert=True)
+            except (BadRequest, TelegramError) as e:
+                 logger.warning(f"Failed to delete settings message on close: {e}")
+        elif data == 'settings_toggle_status': # Вкл/выкл бота для чата
+             settings=dm.get_chat_settings(chat_id)
+             success=dm.update_chat_setting(chat_id,'enabled', not settings.get('enabled',True))
+             if success:
+                 await _display_settings_main(update,context,chat_id,user_id)
+                 await query.answer(get_text("settings_saved_popup",chat_lang))
+             else: await query.answer(get_text("error_db_generic",chat_lang),show_alert=True)
 
-        # --- Переходы в подменю ---
+        # --- Отображение Подменю ---
         elif data == 'settings_show_lang': await _display_settings_language(update, context, chat_id, user_id)
         elif data == 'settings_show_time': await _display_settings_time(update, context, chat_id, user_id)
         elif data == 'settings_show_tz': await _display_settings_timezone(update, context, chat_id, user_id)
@@ -425,81 +414,122 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         elif data == 'settings_show_personality': await _display_settings_personality(update, context, chat_id, user_id)
         elif data == 'settings_show_format': await _display_settings_output_format(update, context, chat_id, user_id)
         elif data == 'settings_show_retention': await _display_settings_retention(update, context, chat_id, user_id)
-        elif data == 'settings_show_interventions': await _display_settings_interventions(update, context, chat_id, user_id)
+        elif data == 'settings_toggle_interventions': # Вкл/выкл вмешательств (из главного меню или из подменю)
+             settings=dm.get_chat_settings(chat_id)
+             new_state = not settings.get('allow_interventions',False)
+             success=dm.update_chat_setting(chat_id,'allow_interventions', new_state)
+             if success:
+                 await _display_settings_main(update,context,chat_id,user_id) # Всегда возвращаемся в главное
+                 await query.answer(get_text("settings_saved_popup",chat_lang))
+             else: await query.answer(get_text("error_db_generic",chat_lang),show_alert=True)
+        elif data == 'settings_show_interventions': # Показать настройки вмешательств
+            await _display_settings_interventions(update, context, chat_id, user_id)
 
-        # --- Обработка кнопок установки значений ---
+        # =============================================
+        # == Обработка УСТАНОВКИ ЗНАЧЕНИЙ ==============
+        # =============================================
         elif data.startswith('settings_set_'):
             parts = data.split('_')
-            if len(parts) < 4: # settings_set_KEY_VALUE...
-                logger.warning(f"Invalid set callback format: {data}"); return
+            if len(parts) < 4: logger.warning(f"Invalid set CB format: {data}"); return
 
             setting_type = parts[2]
-            # Правильно извлекаем значение, учитывая возможные '_' в самом значении (для таймзоны)
-            value_str = '_'.join(parts[3:]) if setting_type == 'tz' else parts[-1]
+            value_str = parts[-1] # Последняя часть как значение (кроме TZ)
+            db_key = "" # Ключ для БД
+            db_value: Any = None # Значение для БД
+            popup_message = get_text("settings_saved_popup", chat_lang) # Сообщение об успехе по умолч.
+            needs_display_main = True # Флаг, нужно ли перерисовывать главное меню
+            alert_on_error = True # Показывать ли алерт при ошибке БД
+            was_corrected = False # Флаг коррекции для настроек вмешательств
 
-            db_key: Optional[str] = None
-            db_value: Any = None
-            popup_message: str = get_text("settings_saved_popup", chat_lang) # Уведомление по умолчанию
-            needs_main_menu_update: bool = True # Большинство настроек возвращают в главное меню
-
-            # Определяем ключ БД и преобразуем/валидируем значение
+            # Определяем ключ БД и значение в зависимости от типа
             if setting_type == 'lang' and value_str in SUPPORTED_LANGUAGES:
-                db_key = 'lang'; db_value = value_str; popup_message = get_text("settings_lang_selected", value_str) # Text on NEW lang
-                # Нужно обновить кэш и команды после сохранения
-                update_chat_lang_cache(chat_id, db_value)
-                # Запуск обновления команд в фоне, чтобы не блокировать ответ
-                # asyncio.create_task(_update_bot_commands(context, chat_id, user_id, db_value))
-            elif setting_type == 'tz' and value_str in COMMON_TIMEZONES:
-                db_key = 'timezone'; db_value = value_str; popup_message = get_text("settings_tz_selected", chat_lang)
+                 db_key = 'lang'; db_value = value_str; popup_message = get_text("settings_lang_selected", value_str)
+            elif setting_type == 'tz': # Таймзона может содержать '_'
+                 db_key = 'timezone'; db_value = '_'.join(parts[3:])
+                 if db_value not in COMMON_TIMEZONES: logger.warning(f"Invalid TZ value: {db_value}"); return
+                 popup_message = get_text("settings_tz_selected", chat_lang)
             elif setting_type == 'genre' and value_str in SUPPORTED_GENRES:
-                db_key = 'story_genre'; db_value = value_str; popup_message = get_text("settings_genre_selected", chat_lang)
+                 db_key = 'story_genre'; db_value = value_str; popup_message = get_text("settings_genre_selected", chat_lang)
             elif setting_type == 'personality' and value_str in SUPPORTED_PERSONALITIES:
-                db_key = 'story_personality'; db_value = value_str; popup_message = get_text("settings_personality_selected", chat_lang)
+                 db_key = 'story_personality'; db_value = value_str; popup_message = get_text("settings_personality_selected", chat_lang)
             elif setting_type == 'format' and value_str in SUPPORTED_OUTPUT_FORMATS:
-                db_key = 'output_format'; db_value = value_str; popup_message = get_text("settings_format_selected", chat_lang)
+                 db_key = 'output_format'; db_value = value_str; popup_message = get_text("settings_format_selected", chat_lang)
             elif setting_type == 'retention':
-                db_key = 'retention_days'; db_value = None if value_str == 'inf' else int(value_str); popup_message = get_text("settings_retention_selected", chat_lang)
-            # Параметры вмешательства обрабатываются отдельной функцией
-            elif setting_type == 'cooldown': await _handle_intervention_setting_update(update, context, chat_id, user_id, 'intervention_cooldown_minutes', int(value_str)); return
-            elif setting_type == 'minmsgs': await _handle_intervention_setting_update(update, context, chat_id, user_id, 'intervention_min_msgs', int(value_str)); return
-            elif setting_type == 'timespan': await _handle_intervention_setting_update(update, context, chat_id, user_id, 'intervention_timespan_minutes', int(value_str)); return
-            else:
-                logger.warning(f"Unknown setting type in CB: {data}"); return
+                 db_key = 'retention_days'; db_value = None if value_str == 'inf' else int(value_str)
+                 popup_message = get_text("settings_retention_selected", chat_lang)
+            elif setting_type == 'time' and value_str == 'default': # Кнопка сброса времени
+                 db_key = 'custom_schedule_time'; db_value = None
+                 # Сообщение об успехе можно сделать специфичным
+                 # popup_message = get_text("settings_time_reset_success", chat_lang, ...)
+            # --- Обработка НАСТРОЕК ВМЕШАТЕЛЬСТВ ---
+            elif setting_type == 'cooldown':
+                 db_key = 'intervention_cooldown_minutes'
+                 limits = (INTERVENTION_MIN_COOLDOWN_MIN, INTERVENTION_MAX_COOLDOWN_MIN)
+                 val_int = int(value_str); db_value = max(limits[0], min(val_int, limits[1]))
+                 if db_value != val_int: was_corrected = True
+                 needs_display_main = False # Остаемся в подменю вмешательств
+                 popup_message = get_text("settings_interventions_saved_popup", chat_lang)
+            elif setting_type == 'minmsgs':
+                 db_key = 'intervention_min_msgs'
+                 limits = (INTERVENTION_MIN_MIN_MSGS, INTERVENTION_MAX_MIN_MSGS)
+                 val_int = int(value_str); db_value = max(limits[0], min(val_int, limits[1]))
+                 if db_value != val_int: was_corrected = True
+                 needs_display_main = False
+                 popup_message = get_text("settings_interventions_saved_popup", chat_lang)
+            elif setting_type == 'timespan':
+                 db_key = 'intervention_timespan_minutes'
+                 limits = (INTERVENTION_MIN_TIMESPAN_MIN, INTERVENTION_MAX_TIMESPAN_MIN)
+                 val_int = int(value_str); db_value = max(limits[0], min(val_int, limits[1]))
+                 if db_value != val_int: was_corrected = True
+                 needs_display_main = False
+                 popup_message = get_text("settings_interventions_saved_popup", chat_lang)
+            # ----------------------------------------
+            else: logger.warning(f"Unhandled setting type/value: {data}"); return # Неизвестная настройка
 
-            # Сохраняем в БД, если ключ определен
-            success = False
-            if db_key is not None:
+            # Сохранение в БД
+            if db_key: # Убедимся, что ключ определен
                 success = dm.update_chat_setting(chat_id, db_key, db_value)
+                if success:
+                    # Дополнительные действия после сохранения
+                    if db_key == 'lang' and isinstance(db_value, str):
+                        update_chat_lang_cache(chat_id, db_value)
+                        # await _update_bot_commands(...) # Раскомментировать, если нужно менять команды при смене языка
 
-            # Обновление интерфейса и уведомление
-            if success and needs_main_menu_update:
-                await _display_settings_main(update, context, chat_id, user_id)
-                await query.answer(popup_message)
-            elif not success:
-                await query.answer(get_text("error_db_generic", chat_lang), show_alert=True)
+                    # Перерисовываем меню и показываем уведомление
+                    if needs_display_main:
+                        await _display_settings_main(update, context, chat_id, user_id)
+                    else: # Перерисовываем подменю вмешательств
+                        await _display_settings_interventions(update, context, chat_id, user_id)
 
-        # Обработка сброса времени (не подпадает под 'settings_set_')
-        elif data == 'settings_set_time_default':
-            if dm.update_chat_setting(chat_id, 'custom_schedule_time', None):
-                 await _display_settings_main(update, context, chat_id, user_id)
-                 await query.answer(get_text("settings_saved_popup", chat_lang))
-            else: await query.answer(get_text("error_db_generic", chat_lang), show_alert=True)
+                    # Показываем попап об успехе или коррекции
+                    if was_corrected:
+                        corrected_popup = get_text("error_value_corrected", chat_lang, min_val=limits[0], max_val=limits[1]).format(value=db_value)
+                        await query.answer(corrected_popup, show_alert=True)
+                    else:
+                        await query.answer(popup_message)
+                else: # Ошибка сохранения БД
+                    await query.answer(get_text("error_db_generic", chat_lang), show_alert=alert_on_error)
+            else:
+                 logger.error(f"DB key was not determined for callback data: {data}") # Ошибка логики
+
+        # --- Кнопка сброса времени (обработана выше в блоке 'settings_set_') ---
+        # elif data == 'settings_set_time_default': # Этот блок больше не нужен здесь
+        #     # ...
 
         else:
-            logger.warning(f"Unhandled settings callback data: {data}")
+             logger.warning(f"Unknown settings callback data: {data}")
 
-    # Обработка исключений
     except BadRequest as e:
-        # Игнорируем "Message is not modified"
-        if "Message is not modified" in str(e): logger.debug(f"Settings message not modified: {e}")
-        else: logger.error(f"BadRequest in settings callback: {e}", exc_info=True)
+        # Часто "Message is not modified", игнорируем её или логируем как DEBUG
+        if "Message is not modified" in str(e): logger.debug(f"Settings CB BadRequest (not modified): {e}")
+        else: logger.error(f"BadRequest in settings CB handler: {e}", exc_info=True)
     except TelegramError as e:
-        logger.error(f"TelegramError in settings callback: {e}", exc_info=True)
+        logger.error(f"TelegramError in settings CB handler: {e}", exc_info=True)
         await query.answer(get_text("error_telegram", chat_lang, error=e.__class__.__name__), show_alert=True)
     except Exception as e:
-        logger.exception(f"Unexpected error in settings callback handler: {e}")
-        await query.answer(get_text("error_db_generic", chat_lang), show_alert=True) # Общая ошибка БД/логики
-        await notify_owner(context=context, message="Crit err settings_callback", operation="settings_callback", exception=e, important=True)
+        logger.exception(f"Unexpected error in settings CB handler: {e}")
+        await query.answer(get_text("error_db_generic", chat_lang), show_alert=True) # Общая ошибка
+        await notify_owner(context=context, message="Critical error in settings_callback_handler", chat_id=chat_id, user_id=user_id, operation="settings_callback", exception=e, important=True)
 
 async def _handle_intervention_setting_update(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, setting_key: str, value: int):
      """Внутр: Обновляет настройку вмешательства, проверяет лимиты, дает ОС."""
@@ -596,34 +626,60 @@ async def summary_period_button_handler(update: Update, context: ContextTypes.DE
 
 
 async def stats_period_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    q = update.callback_query; await q.answer(); user = q.from_user; chat = q.message.chat
+    """НОВЫЙ: Обработка выбора периода для /chat_stats (^stats_period_)."""
+    query = update.callback_query; await query.answer(); user = query.from_user; chat = query.message.chat
     if not user or not chat: return
-    chat_lang, _ = await get_chat_info(chat.id, context); data = q.data
-    if data == "stats_period_cancel": await q.edit_message_text(get_text("action_cancelled", chat_lang), reply_markup=None); return
-    period_key = data.removeprefix("stats_period_"); now = datetime.datetime.now(pytz.utc); start_dt = None
+    chat_id = chat.id # Сохраняем ID
+    chat_lang, _ = await get_chat_info(chat_id, context); data = query.data # Используем chat_id
+
+    if data == "stats_period_cancel": await query.edit_message_text(get_text("action_cancelled", chat_lang), reply_markup=None); return
+    period_key = data.removeprefix("stats_period_"); now = datetime.datetime.now(pytz.utc); start_dt = None;
+
     if period_key == "today": start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period_key == "week": start_dt = (now - datetime.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     elif period_key == "month": start_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     else: logger.error(f"Unknown stats key: {period_key}"); return
-    stats_data=None; error_msg = None
-    try: stats_data = dm.get_chat_stats(chat.id, start_dt)
-    except Exception: logger.exception(f"Failed get stats c={chat.id} p={period_key}"); error_msg = get_text("stats_error", chat_lang)
-    if error_msg: await q.edit_message_text(error_msg, reply_markup=None); return
-    if not stats_data or stats_data['total_messages'] == 0: await q.edit_message_text(get_text("stats_no_data", chat_lang), reply_markup=None); return
+
+    stats_data = None; error_msg = None
+    try:
+        stats_data = dm.get_chat_stats(chat_id, start_dt) # Используем сохраненный chat_id
+    except Exception as e:
+        # Ловим ошибки уровня выше, если get_chat_stats не обработал
+        logger.exception(f"Failed get stats c={chat_id} p={period_key}")
+        error_msg = get_text("stats_error", chat_lang)
+
+    # --- ИСПРАВЛЕНО: Упрощенная проверка ---
+    # Если произошла ошибка ИЛИ get_chat_stats вернул None ИЛИ сообщений 0
+    if error_msg or not stats_data or stats_data.get('total_messages', 0) == 0:
+        # -----------------------------------------
+        final_message = error_msg or get_text("stats_no_data", chat_lang) # Показываем ошибку или "нет данных"
+        logger.info(f"Stats result for chat {chat_id} p={period_key}: No data or error ({error_msg=})")
+        await query.edit_message_text(final_message, reply_markup=None);
+        return
+
+    # Форматируем результат (как раньше)
     period_name = get_stats_period_name(period_key, chat_lang)
     text = get_text("stats_title", chat_lang, period_name=period_name) + "\n\n"
     text += get_text("stats_total_messages", chat_lang, count=stats_data['total_messages']) + "\n"
     text += get_text("stats_photos", chat_lang, count=stats_data['photos']) + "\n"
     text += get_text("stats_stickers", chat_lang, count=stats_data['stickers']) + "\n"
-    if stats_data['top_users']:
+    text += get_text("stats_active_users", chat_lang, count=stats_data['active_users']) + "\n" # Добавили отображение active_users
+    if stats_data.get('top_users'): # Проверка, что список не пустой
         text += "\n" + get_text("stats_top_users_header", chat_lang) + "\n"
         for username, count in stats_data['top_users']:
-             # --- ИСПРАВЛЕНО ---
              safe_username = html.escape(username or '??')
              text += get_text("stats_user_entry", chat_lang, username=safe_username, count=count) + "\n"
-             # -------------------
-    await q.edit_message_text(text.strip(), reply_markup=None, parse_mode=ParseMode.HTML)
 
+    try:
+        await query.edit_message_text(text.strip(), reply_markup=None, parse_mode=ParseMode.HTML)
+        logger.info(f"Stats displayed for chat {chat_id} p={period_key}")
+    except BadRequest as e: # Обработка ошибки, если сообщение не изменилось
+        if "Message is not modified" in str(e): logger.debug(f"Stats message not modified chat={chat_id}")
+        else: logger.error(f"Failed to edit stats message chat={chat_id}: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error editing stats message chat={chat_id}: {e}")
+        
+        
 async def purge_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """НОВЫЙ: Обработка подтверждения очистки (^purge_)."""
     query = update.callback_query; await query.answer(); user = query.from_user; chat = query.message.chat
@@ -859,55 +915,109 @@ async def _display_settings_main(update: Update, context: ContextTypes.DEFAULT_T
     chat_lang, chat_title_safe = await get_chat_info(chat_id, context)
     settings = dm.get_chat_settings(chat_id)
 
-    # Получение и форматирование всех текущих значений
-    status_text = get_text("enabled_status" if settings['enabled'] else "disabled_status", chat_lang)
-    lang_name = LOCALIZED_TEXTS.get(settings['lang'], {}).get("lang_name", settings['lang'])
+    # Получение и форматирование всех текущих значений для отображения
+    status_text = get_text("enabled_status" if settings.get('enabled', True) else "disabled_status", chat_lang)
+    lang_name = LOCALIZED_TEXTS.get(settings.get('lang', DEFAULT_LANGUAGE), {}).get("lang_name", settings.get('lang', DEFAULT_LANGUAGE))
     chat_tz_str = settings.get('timezone', 'UTC')
     tz_display_name = COMMON_TIMEZONES.get(chat_tz_str, chat_tz_str)
     genre_display_name = get_genre_name(settings.get('story_genre', 'default'), chat_lang)
     personality_display_name = get_personality_name(settings.get('story_personality', DEFAULT_PERSONALITY), chat_lang)
     output_format_display_name = get_output_format_name(settings.get('output_format', DEFAULT_OUTPUT_FORMAT), chat_lang)
-    retention_display = format_retention_days(settings.get('retention_days'), chat_lang)
-    intervention_status_text = get_text("settings_interventions_enabled" if settings.get('allow_interventions', False) else "settings_interventions_disabled", chat_lang)
+    retention_display = format_retention_days(settings.get('retention_days'), chat_lang) # Получаем строку 'N дн.' или 'Бессрочно'
+    interventions_allowed = settings.get('allow_interventions', False) # Получаем булево значение
+    intervention_status_text = get_text("settings_interventions_enabled" if interventions_allowed else "settings_interventions_disabled", chat_lang) # Получаем локализованный текст статуса
 
-    # Форматирование времени
+    # Форматирование времени генерации
     custom_time_utc_str = settings.get('custom_schedule_time')
     if custom_time_utc_str:
-        try: ch, cm = map(int, custom_time_utc_str.split(':')); lt, tzs = format_time_for_chat(ch, cm, chat_tz_str); time_display = f"{lt} {tzs}"
-        except ValueError: time_display = f"{custom_time_utc_str} UTC (err)"
-    else: lt, tzs = format_time_for_chat(SCHEDULE_HOUR, SCHEDULE_MINUTE, chat_tz_str); time_display = f"~{lt} {tzs}"
+        try:
+            ch, cm = map(int, custom_time_utc_str.split(':'))
+            local_time_str, tz_short = format_time_for_chat(ch, cm, chat_tz_str)
+            # Отображаем локальное время + часовой пояс + UTC в скобках
+            time_display = f"{local_time_str} {tz_short} ({custom_time_utc_str} UTC)"
+        except (ValueError, TypeError):
+            time_display = f"{custom_time_utc_str} UTC (invalid format)" # Ошибка формата
+            logger.warning(f"Invalid custom time format in DB for chat {chat_id}: {custom_time_utc_str}")
+    else:
+        local_time_str, tz_short = format_time_for_chat(SCHEDULE_HOUR, SCHEDULE_MINUTE, chat_tz_str)
+        # Показываем локальное время по умолчанию + пояс + UTC в скобках
+        time_display = f"~{local_time_str} {tz_short} ({SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} UTC)" # Время по умолчанию
 
-    # Сборка текста
+    # Сборка текста сообщения настроек
     text = get_text("settings_title", chat_lang, chat_title=chat_title_safe) + "\n\n"
-    text += f"▪️ Статус: {status_text}\n"
-    text += f"▪️ Язык: {lang_name}\n"
-    text += f"▪️ Формат: {output_format_display_name}\n"
-    text += f"▪️ Личность: {personality_display_name}\n"
-    text += f"▪️ Жанр: {genre_display_name}\n"
-    text += f"▪️ Время: {time_display}\n"
-    text += f"▪️ Пояс: {tz_display_name}\n"
-    text += f"▪️ Хранение: {retention_display}\n"
-    text += f"▪️ Вмешательства: {intervention_status_text}"
+    text += f"▪️ {get_text('settings_status_label', chat_lang)}: {status_text}\n"
+    text += f"▪️ {get_text('settings_language_label', chat_lang)}: {lang_name}\n"
+    text += f"▪️ {get_text('settings_output_format_label', chat_lang)}: {output_format_display_name}\n"
+    text += f"▪️ {get_text('settings_personality_label', chat_lang)}: {personality_display_name}\n"
+    text += f"▪️ {get_text('settings_genre_label', chat_lang)}: {genre_display_name}\n"
+    text += f"▪️ {get_text('settings_time_label', chat_lang)}: {time_display}\n"
+    text += f"▪️ {get_text('settings_timezone_label', chat_lang)}: {tz_display_name}\n"
+    text += f"▪️ {get_text('settings_retention_label', chat_lang)}: {retention_display}\n"
+    text += f"▪️ {get_text('settings_interventions_label', chat_lang)}: {intervention_status_text}"
 
-    # Кнопки (Разбиваем на ряды для читаемости)
-    row1 = [InlineKeyboardButton(get_text("settings_button_toggle_on" if settings['enabled'] else "settings_button_toggle_off", chat_lang), callback_data='settings_toggle_status')]
-    row2 = [InlineKeyboardButton(f"🌐 {lang_name.split(' ')[0]}", callback_data='settings_show_lang'), InlineKeyboardButton(f"📜 {output_format_display_name}", callback_data='settings_show_format')]
-    row3 = [InlineKeyboardButton(f"👤 {personality_display_name}", callback_data='settings_show_personality'), InlineKeyboardButton(f"🎭 {genre_display_name}", callback_data='settings_show_genre')]
-    row4 = [InlineKeyboardButton(f"⏰ {time_display.split(' ')[0]}", callback_data='settings_show_time'), InlineKeyboardButton(f"🌍 {tz_display_name.split(' ')[0]}", callback_data='settings_show_tz')]
-    row5 = [InlineKeyboardButton(f"💾 {retention_display}", callback_data='settings_show_retention')]
-    # Кнопка Вмешательств: Либо вкл/выкл, либо переход в настройки
-    inter_enabled = settings.get('allow_interventions', False)
-    inter_btn_text = get_text("settings_interventions_label", chat_lang) if inter_enabled else get_text("settings_button_toggle_interventions_off", chat_lang)
-    inter_cb = 'settings_show_interventions' if inter_enabled else 'settings_toggle_interventions'
-    row5.append(InlineKeyboardButton(f"🤖 {inter_btn_text}", callback_data=inter_cb))
+    # Сборка клавиатуры
+    # Ряд 1: Статус
+    row1 = [InlineKeyboardButton(
+        get_text("settings_button_toggle_on" if settings.get('enabled', True) else "settings_button_toggle_off", chat_lang),
+        callback_data='settings_toggle_status'
+    )]
+    # Ряд 2: Язык, Формат
+    row2 = [
+        InlineKeyboardButton(f"🌐 {lang_name.split(' ')[0]}", callback_data='settings_show_lang'), # Используем первую часть имени языка для краткости
+        InlineKeyboardButton(f"📜 {output_format_display_name}", callback_data='settings_show_format')
+    ]
+    # Ряд 3: Личность, Жанр
+    row3 = [
+        InlineKeyboardButton(f"👤 {personality_display_name}", callback_data='settings_show_personality'),
+        InlineKeyboardButton(f"🎭 {genre_display_name}", callback_data='settings_show_genre')
+    ]
+    # Ряд 4: Время, Таймзона
+    row4 = [
+        InlineKeyboardButton(f"⏰ {time_display.split(' ')[0]}", callback_data='settings_show_time'), # Показываем только время HH:MM
+        InlineKeyboardButton(f"🌍 {tz_display_name.split(' ')[0]}", callback_data='settings_show_tz') # Показываем только первую часть названия TZ
+    ]
+    # Ряд 5: Хранение, Вмешательства
+    row5 = [
+        InlineKeyboardButton(f"💾 {retention_display}", callback_data='settings_show_retention')
+    ]
+    # Логика для кнопки Вмешательств
+    if interventions_allowed:
+        # Если ВКЛЮЧЕНО: Кнопка ведет в подменю настроек
+        inter_btn_text = get_text("settings_interventions_label", chat_lang) # Напр: "Вмешательства"
+        inter_cb = 'settings_show_interventions'
+        row5.append(InlineKeyboardButton(f"⚙️ {inter_btn_text}", callback_data=inter_cb)) # Используем иконку настроек
+    else:
+        # Если ВЫКЛЮЧЕНО: Кнопка предлагает включить
+        inter_btn_text = get_text("settings_button_toggle_interventions_off", chat_lang) # Напр: "✅ Разрешить вмешательства"
+        inter_cb = 'settings_toggle_interventions'
+        row5.append(InlineKeyboardButton(f"🤖 {inter_btn_text}", callback_data=inter_cb)) # Используем иконку робота
+
+    # Ряд 6: Закрыть
     row6 = [InlineKeyboardButton(get_text("button_close", chat_lang), callback_data='settings_close')]
 
-    kbd = InlineKeyboardMarkup([row1, row2, row3, row4, row5, row6])
+    keyboard_markup = InlineKeyboardMarkup([row1, row2, row3, row4, row5, row6])
 
-    # Отправка / Редактирование
+    # Отправка или Редактирование сообщения
     query = update.callback_query
-    if query and query.message: await query.edit_message_text(text, reply_markup=kbd, parse_mode=ParseMode.HTML)
-    elif update.message: await update.message.reply_html(text, reply_markup=kbd)
+    if query and query.message: # Если вызвано из колбэка, редактируем
+        try:
+            await query.edit_message_text(
+                text=text,
+                reply_markup=keyboard_markup,
+                parse_mode=ParseMode.HTML
+            )
+        except BadRequest as e:
+            # Игнорируем ошибку "Message is not modified"
+            if "Message is not modified" not in str(e):
+                logger.error(f"BadRequest editing settings message: {e}", exc_info=True)
+        except TelegramError as e:
+             logger.error(f"TelegramError editing settings message: {e}", exc_info=True)
+
+    elif update.message: # Если вызвано командой /story_settings, отправляем новое
+        try:
+            await update.message.reply_html(text=text, reply_markup=keyboard_markup)
+        except TelegramError as e:
+             logger.error(f"TelegramError sending new settings message: {e}", exc_info=True)
 
 # --- ПОДМЕНЮ ЯЗЫКА ---
 async def _display_settings_language(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
@@ -992,39 +1102,83 @@ async def _display_settings_retention(update: Update, context: ContextTypes.DEFA
 
 # --- ПОДМЕНЮ НАСТРОЕК ВМЕШАТЕЛЬСТВ ---
 async def _display_settings_interventions(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
-    """Подменю настроек Вмешательств Летописца."""
+    """Отображает подменю настроек Вмешательств Летописца."""
+    query = update.callback_query
+    if not query: # This function should only be called from a callback query
+        logger.warning("_display_settings_interventions called without a query.")
+        return
+
     chat_lang = await get_chat_lang(chat_id)
     # Получаем *фактические* настройки (с дефолтами, если NULL в БД)
     inter_settings = dm.get_intervention_settings(chat_id)
-    cooldown = inter_settings['cooldown_minutes']
-    min_msgs = inter_settings['min_msgs']
-    timespan = inter_settings['timespan_minutes']
+    current_cooldown = inter_settings.get('cooldown_minutes', INTERVENTION_DEFAULT_COOLDOWN_MIN)
+    current_min_msgs = inter_settings.get('min_msgs', INTERVENTION_DEFAULT_MIN_MSGS)
+    current_timespan = inter_settings.get('timespan_minutes', INTERVENTION_DEFAULT_TIMESPAN_MIN)
 
-    # Текст с описанием текущих и предельных значений
-    text = get_text("settings_interventions_title", chat_lang) + "\n"
-    text += get_text("settings_interventions_warning", chat_lang) + "\n\n"
-    text += f"<b>{get_text('settings_intervention_cooldown_label', chat_lang)}:</b>\n"
-    text += get_text("settings_intervention_current_value", chat_lang, value=cooldown, min_val=INTERVENTION_MIN_COOLDOWN_MIN, max_val=INTERVENTION_MAX_COOLDOWN_MIN, def_val=INTERVENTION_DEFAULT_COOLDOWN_MIN) + "\n"
-    text += f"<b>{get_text('settings_intervention_min_msgs_label', chat_lang)}:</b>\n"
-    text += get_text("settings_intervention_current_value", chat_lang, value=min_msgs, min_val=INTERVENTION_MIN_MIN_MSGS, max_val=INTERVENTION_MAX_MIN_MSGS, def_val=INTERVENTION_DEFAULT_MIN_MSGS) + "\n"
-    text += f"<b>{get_text('settings_intervention_timespan_label', chat_lang)}:</b>\n"
-    text += get_text("settings_intervention_current_value", chat_lang, value=timespan, min_val=INTERVENTION_MIN_TIMESPAN_MIN, max_val=INTERVENTION_MAX_TIMESPAN_MIN, def_val=INTERVENTION_DEFAULT_TIMESPAN_MIN) + "\n\n"
-    text += get_text("settings_interventions_change_hint", chat_lang)
+    # Формирование текста сообщения
+    text = f"<b>{get_text('settings_interventions_title', chat_lang)}</b>\n\n"
+    # Cooldown
+    limits_cd = {'min_val': INTERVENTION_MIN_COOLDOWN_MIN, 'max_val': INTERVENTION_MAX_COOLDOWN_MIN, 'def_val': INTERVENTION_DEFAULT_COOLDOWN_MIN}
+    text += f"▪️ <b>{get_text('settings_intervention_cooldown_label', chat_lang)}:</b>\n"
+    text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_cooldown, **limits_cd)}\n"
+    # Min Messages
+    limits_mm = {'min_val': INTERVENTION_MIN_MIN_MSGS, 'max_val': INTERVENTION_MAX_MIN_MSGS, 'def_val': INTERVENTION_DEFAULT_MIN_MSGS}
+    text += f"▪️ <b>{get_text('settings_intervention_min_msgs_label', chat_lang)}:</b>\n"
+    text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_min_msgs, **limits_mm)}\n"
+    # Timespan
+    limits_ts = {'min_val': INTERVENTION_MIN_TIMESPAN_MIN, 'max_val': INTERVENTION_MAX_TIMESPAN_MIN, 'def_val': INTERVENTION_DEFAULT_TIMESPAN_MIN}
+    text += f"▪️ <b>{get_text('settings_intervention_timespan_label', chat_lang)}:</b>\n"
+    text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_timespan, **limits_ts)}\n\n"
+    text += f"<i>{get_text('settings_interventions_change_hint', chat_lang)}</i>"
 
-    # --- Кнопки ---
-    # Cooldown (1ч, 3ч, 6ч, 12ч, 24ч)
+    # --- Формирование кнопок ---
+    button_rows = []
+
+    # 1. Кнопка "Запретить вмешательства"
+    disable_text = get_text("settings_button_toggle_interventions_on", chat_lang) # Text like "❌ Forbid..."
+    button_rows.append([InlineKeyboardButton(disable_text, callback_data="settings_toggle_interventions")])
+
+    # 2. Кнопки Cooldown (1ч, 3ч, 6ч, 12ч, 24ч)
     cd_options = [60, 180, 360, 720, 1440]
-    cd_btns = [InlineKeyboardButton(f"{'✅ ' if cd == cooldown else ''}{cd//60} ч", callback_data=f"settings_set_cooldown_{cd}") for cd in cd_options]
-    # Min Msgs (3, 5, 7, 10)
-    mm_options = [3, 5, 7, 10]
-    mm_btns = [InlineKeyboardButton(f"{'✅ ' if mm == min_msgs else ''}{mm}", callback_data=f"settings_set_minmsgs_{mm}") for mm in mm_options]
-    # Timespan (5м, 10м, 15м, 30м)
-    ts_options = [5, 10, 15, 30]
-    ts_btns = [InlineKeyboardButton(f"{'✅ ' if ts == timespan else ''}{ts} м", callback_data=f"settings_set_timespan_{ts}") for ts in ts_options]
-    # Back button
-    back_btn = [InlineKeyboardButton(get_text("button_back", chat_lang), callback_data="settings_main")]
+    cd_btns = []
+    for cd in cd_options:
+        prefix = "✅ " if cd == current_cooldown else ""
+        hours = cd // 60
+        text_val = f"{hours} ч" if hours > 0 else f"{cd} мин" # Отображаем часы
+        # Проверяем, попадает ли значение в лимиты, чтобы не предлагать невалидные опции (на всякий случай)
+        if INTERVENTION_MIN_COOLDOWN_MIN <= cd <= INTERVENTION_MAX_COOLDOWN_MIN:
+            cd_btns.append(InlineKeyboardButton(f"{prefix}{text_val}", callback_data=f"settings_set_cooldown_{cd}"))
+    # Размещаем кнопки кулдауна в 1 или 2 ряда
+    if len(cd_btns) <= 3: button_rows.append(cd_btns)
+    elif len(cd_btns) <= 6: button_rows.append(cd_btns[:3]); button_rows.append(cd_btns[3:])
+    else: button_rows.append(cd_btns) # Default to one row if more than 6
 
-    # Собираем клавиатуру (кнопки кулдауна в 2 ряда)
-    kbd = [[cd_btns[0], cd_btns[1], cd_btns[2]], [cd_btns[3], cd_btns[4]], mm_btns, ts_btns, back_btn]
-    query = update.callback_query
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kbd), parse_mode=ParseMode.HTML)
+    # 3. Кнопки Min Msgs (3, 5, 7, 10)
+    mm_options = [3, 5, 7, 10]
+    mm_btns = []
+    for mm in mm_options:
+        prefix = "✅ " if mm == current_min_msgs else ""
+        # Проверка лимитов
+        if INTERVENTION_MIN_MIN_MSGS <= mm <= INTERVENTION_MAX_MIN_MSGS:
+            mm_btns.append(InlineKeyboardButton(f"{prefix}{mm}", callback_data=f"settings_set_minmsgs_{mm}"))
+    if mm_btns: button_rows.append(mm_btns)
+
+    # 4. Кнопки Timespan (5м, 10м, 15м, 30м)
+    ts_options = [5, 10, 15, 30]
+    ts_btns = []
+    for ts in ts_options:
+        prefix = "✅ " if ts == current_timespan else ""
+        # Проверка лимитов
+        if INTERVENTION_MIN_TIMESPAN_MIN <= ts <= INTERVENTION_MAX_TIMESPAN_MIN:
+            ts_btns.append(InlineKeyboardButton(f"{prefix}{ts} м", callback_data=f"settings_set_timespan_{ts}"))
+    if ts_btns: button_rows.append(ts_btns)
+
+    # 5. Кнопка "Назад"
+    button_rows.append([InlineKeyboardButton(get_text("button_back", chat_lang), callback_data="settings_main")])
+
+    # Редактируем сообщение
+    await query.edit_message_text(
+        text=text,
+        reply_markup=InlineKeyboardMarkup(button_rows),
+        parse_mode=ParseMode.HTML
+    )
