@@ -37,6 +37,13 @@ LOG_FILE = os.getenv("LOG_FILE_PATH", "bot.log") # Путь к файлу лог
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "ru")
 SUPPORTED_LANGUAGES = ["ru", "en"]
 
+SUPPORTED_GENRES = {
+    'default': 'Стандартный', # Отображаемое имя берется из localization
+    'humor': 'Юмористический',
+    'detective': 'Детективный',
+    'fantasy': 'Фэнтезийный',
+    'news_report': 'Новостной репортаж'
+}
 
 COMMON_TIMEZONES = {
     "UTC": "UTC±00:00",
