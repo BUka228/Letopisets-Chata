@@ -11,7 +11,7 @@ from utils import download_images, MAX_PHOTOS_TO_ANALYZE, notify_owner, is_user_
 from telegram.helpers import escape_markdown
 from telegram import (
     Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup,
-    constants as tg_constants # Используем псевдоним для констант
+    constants as tg_constants
 )
 from telegram.ext import (
     ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters,
@@ -111,20 +111,23 @@ def format_time_for_chat(utc_hour: int, utc_minute: int, target_tz_str: str) -> 
 
 
 async def get_settings_text_and_markup(chat_id: int, chat_title: Optional[str]) -> Tuple[str, InlineKeyboardMarkup]:
-    """Генерирует текст и кнопки настроек, учитывая таймзону."""
+    """Генерирует текст и кнопки настроек, включая таймзону и жанр."""
     chat_lang = await get_chat_lang(chat_id)
     settings = dm.get_chat_settings(chat_id)
-    chat_tz_str = settings.get('timezone', 'UTC') # Получаем таймзону чата
+    chat_tz_str = settings.get('timezone', 'UTC')
 
     is_enabled = settings.get('enabled', True)
     current_lang = settings.get('lang', DEFAULT_LANGUAGE)
     custom_time_utc_str = settings.get('custom_schedule_time')
+    # --- ВОЗВРАЩАЕМ ПОЛУЧЕНИЕ ЖАНРА ---
+    current_genre_key = settings.get('story_genre', 'default')
+    # ---------------------------------
 
     status_text = get_text("settings_enabled" if is_enabled else "settings_disabled", chat_lang)
     lang_name = LOCALIZED_TEXTS.get(current_lang, {}).get("lang_name", current_lang)
     lang_text = get_text("settings_language_label", chat_lang) + f": {lang_name}"
 
-    # --- ИЗМЕНЕНО: Форматируем время с учетом таймзоны чата ---
+    # Форматирование времени
     if custom_time_utc_str:
         try:
             ch, cm = map(int, custom_time_utc_str.split(':'))
@@ -138,20 +141,26 @@ async def get_settings_text_and_markup(chat_id: int, chat_title: Optional[str]) 
             "settings_default_time", chat_lang,
             default_hh=f"{SCHEDULE_HOUR:02d}",
             default_mm=f"{SCHEDULE_MINUTE:02d}"
-        ) + f" (UTC)" # Добавляем UTC явно
-    # -----------------------------------------------------------
+        ) + f" (UTC)"
 
-    # --- НОВОЕ: Отображаем текущую таймзону ---
-    tz_display_name = COMMON_TIMEZONES.get(chat_tz_str, chat_tz_str) # Отображаемое имя
+    # Отображение таймзоны
+    tz_display_name = COMMON_TIMEZONES.get(chat_tz_str, chat_tz_str)
     timezone_text = get_text("settings_timezone_label", chat_lang) + f" {tz_display_name}"
-    # -----------------------------------------
+
+    # --- ВОЗВРАЩАЕМ ОТОБРАЖЕНИЕ ЖАНРА ---
+    genre_display_name = get_genre_name(current_genre_key, chat_lang)
+    genre_text = get_text("settings_genre_label", chat_lang) + f": {genre_display_name}"
+    # ------------------------------------
 
     text = (
         f"{get_text('settings_title', chat_lang, chat_title=chat_title or 'Unknown')}\n\n"
         f"▪️ {get_text('settings_status_label', chat_lang)} {status_text}\n"
         f"▪️ {lang_text}\n"
         f"▪️ {time_text}\n"
-        f"▪️ {timezone_text}" # Добавили строку таймзоны
+        f"▪️ {timezone_text}\n"
+        # --- ВОЗВРАЩАЕМ СТРОКУ ЖАНРА В ТЕКСТ ---
+        f"▪️ {genre_text}"
+        # ------------------------------------
     )
 
     # Кнопки
@@ -161,11 +170,15 @@ async def get_settings_text_and_markup(chat_id: int, chat_title: Optional[str]) 
         [InlineKeyboardButton(get_text("settings_button_language", chat_lang), callback_data=CB_CHANGE_LANG)],
         [
             InlineKeyboardButton(get_text("settings_button_time", chat_lang), callback_data=CB_CHANGE_TIME),
-            InlineKeyboardButton(get_text("settings_button_timezone", chat_lang), callback_data=CB_CHANGE_TZ) # Добавили кнопку TZ
+            InlineKeyboardButton(get_text("settings_button_timezone", chat_lang), callback_data=CB_CHANGE_TZ)
         ],
+        # --- ВОЗВРАЩАЕМ КНОПКУ СМЕНЫ ЖАНРА ---
+        [InlineKeyboardButton(get_text("settings_button_genre", chat_lang), callback_data=CB_CHANGE_GENRE)],
+        # --------------------------------------
     ]
     markup = InlineKeyboardMarkup(keyboard)
     return text, markup
+
 
 async def display_settings(
     update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: Optional[int] = None
@@ -1025,8 +1038,8 @@ async def feedback_button_handler(update: Update, context: ContextTypes.DEFAULT_
 async def summary_period_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Обрабатывает нажатие кнопок выбора периода для саммари (/summarize).
-    Получает сообщения, генерирует выжимку и отправляет результат как 2 сообщения (заголовок + тело).
-    Использует ParseMode.MARKDOWN для тела, с fallback на plain text при ошибке парсинга.
+    Получает сообщения, генерирует выжимку и отправляет результат:
+    Заголовок (HTML) + Тело (Markdown).
     """
     query = update.callback_query
     if not query or not query.message:
@@ -1061,108 +1074,107 @@ async def summary_period_button_handler(update: Update, context: ContextTypes.DE
         elif period_key == "last_3h": period_start_utc = now_utc - datetime.timedelta(hours=3)
         elif period_key == "last_24h": period_start_utc = now_utc - datetime.timedelta(hours=24)
         else:
-            logger.error(f"Unknown summary period key: {period_key}"); await context.bot.send_message(chat.id, "Ошибка: Неизвестный период."); return # Выход
+            logger.error(f"Unknown summary period key: {period_key}");
+            if context.bot: await context.bot.send_message(chat.id, "Ошибка: Неизвестный период.");
+            return
         messages_to_summarize = dm.get_messages_for_chat_since(chat.id, period_start_utc)
     except Exception as db_err:
-        logger.exception(f"DB error getting messages for summary ({period_key}) chat {chat.id}:"); await notify_owner(context=context, message="Ошибка БД при получении сообщений для саммари", chat_id=chat.id, operation="get_summary_messages", exception=db_err, important=True)
-        try: await query.edit_message_text(get_text("error_db_generic", chat_lang), reply_markup=None)
+        logger.exception(f"DB error getting messages for summary ({period_key}) chat {chat.id}:");
+        await notify_owner(context=context, message="Ошибка БД при получении сообщений для саммари", chat_id=chat.id, operation="get_summary_messages", exception=db_err, important=True)
+        try:
+            if query.message: # Убедимся что сообщение еще есть
+                await query.edit_message_text(get_text("error_db_generic", chat_lang), reply_markup=None)
         except BadRequest: pass
         return
 
     # 2. Проверяем, нашлись ли сообщения
     if not messages_to_summarize:
         logger.info(f"No messages found for summary period '{period_key}' in chat {chat.id}")
-        try: await query.edit_message_text(get_text("summarize_no_messages", chat_lang), reply_markup=None)
+        try:
+            if query.message: # Убедимся что сообщение еще есть
+                await query.edit_message_text(get_text("summarize_no_messages", chat_lang), reply_markup=None)
         except BadRequest as edit_err: logger.warning(f"Failed to edit 'no messages' for summary: {edit_err}")
         return
 
-    # 3. --- ИЗМЕНЕНИЕ: Удаляем исходное сообщение с кнопками ---
+    # 3. Удаляем исходное сообщение с кнопками и отправляем статус "Генерирую..."
+    # ... (код удаления исходного сообщения и отправки статуса) ...
     original_message_id = query.message.message_id
+    status_message = None # Инициализируем
     try:
-        await query.message.delete()
-        logger.debug(f"Deleted original summary prompt message {original_message_id}")
-    except Exception as del_err:
-        logger.warning(f"Failed to delete original summary prompt message {original_message_id}: {del_err}")
-        # Продолжаем, но можем получить дубликат статуса/результата
+        if query.message: # Проверяем перед удалением
+            await query.message.delete();
+            logger.debug(f"Deleted original summary prompt message {original_message_id}")
+    except Exception as del_err: logger.warning(f"Failed to delete original summary prompt message {original_message_id}: {del_err}")
 
-    # Отправляем временное сообщение "Генерирую..."
-    status_message = await context.bot.send_message(chat.id, get_text("summarize_generating", chat_lang))
+    if context.bot: # Проверяем наличие бота
+        status_message = await context.bot.send_message(chat.id, get_text("summarize_generating", chat_lang))
+        try: await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+        except Exception: pass
 
-    # 4. Генерируем саммари
-    raw_summary_text, error_msg = await gc.safe_generate_summary(messages_to_summarize)
+    # 4. Генерируем саммари (промпт теперь просит Markdown)
+    raw_summary_content, error_msg_from_proxy = await gc.safe_generate_summary(messages_to_summarize)
 
     # 5. Отправляем результат или ошибку
     try:
-        # Удаляем сообщение "Генерирую..." перед отправкой результата/ошибки
-        try:
-            await status_message.delete()
-        except Exception as del_status_err:
-            logger.warning(f"Failed to delete 'generating summary' status message: {del_status_err}")
+        # Удаляем сообщение "Генерирую..."
+        if status_message: # Проверяем перед удалением
+            try: await status_message.delete()
+            except Exception as del_status_err: logger.warning(f"Failed to delete 'generating summary' status message: {del_status_err}")
 
-        if raw_summary_text:
-            # Отправляем заголовок отдельно
+        if raw_summary_content:
+            # Отправляем заголовок отдельно (HTML)
             period_name = get_period_name(period_key, chat_lang)
-            # Используем HTML для заголовка, как в daily_job, для консистентности
             header_html = get_text("summarize_header", chat_lang, period_name=period_name)
-            try:
-                await context.bot.send_message(chat.id, header_html, parse_mode=ParseMode.HTML)
-                await asyncio.sleep(0.2) # Небольшая пауза
-            except Exception as header_err:
-                 logger.error(f"Failed to send summary header for chat {chat.id}: {header_err}")
-                 # Продолжаем пытаться отправить тело
+            if context.bot: # Проверяем наличие бота
+                try:
+                    await context.bot.send_message(chat.id, header_html, parse_mode=ParseMode.HTML)
+                    await asyncio.sleep(0.2) # Пауза
+                except Exception as header_err:
+                    logger.error(f"Failed to send summary header for chat {chat.id}: {header_err}")
 
-            # Отправляем тело саммари с Markdown V2
-            try:
-                await context.bot.send_message(chat.id, raw_summary_text, parse_mode=ParseMode.MARKDOWN)
-                logger.info(f"Summary (Markdown body) sent for period '{period_key}' in chat {chat.id}")
-            except BadRequest as md_send_error:
-                 if "Can't parse entities" in str(md_send_error):
-                     logger.error(f"Failed to parse Markdown entities in summary body. Error: {md_send_error}. Sending as plain text.")
-                     # Fallback: отправляем как простой текст
-                     try:
-                         await context.bot.send_message(chat.id, raw_summary_text) # Без parse_mode
-                         logger.info(f"Summary (Plain text fallback) sent for period '{period_key}' in chat {chat.id}")
-                     except Exception as plain_send_err:
-                          logger.error(f"Failed to send summary even as plain text: {plain_send_err}")
-                          await notify_owner(context=context, message="Не удалось отправить саммари даже как простой текст", chat_id=chat.id, operation="send_summary_plain_fallback", exception=plain_send_err, important=True)
-                 else:
-                      # Другая ошибка BadRequest при отправке тела
-                      logger.error(f"Failed to send summary body (non-parsing BadRequest): {md_send_error}")
-                      await notify_owner(context=context, message="Не удалось отправить тело саммари (BadRequest)", chat_id=chat.id, operation="send_summary_body", exception=md_send_error, important=True)
-                      try: await context.bot.send_message(chat.id, "Произошла ошибка при отправке выжимки (форматирование).")
-                      except Exception: pass
-            except TelegramError as tg_send_error:
-                 # Другая ошибка Telegram при отправке тела
-                 logger.error(f"Failed to send summary body (TelegramError): {tg_send_error}")
-                 await notify_owner(context=context, message="Не удалось отправить тело саммари (TelegramError)", chat_id=chat.id, operation="send_summary_body", exception=tg_send_error, important=True)
-                 try: await context.bot.send_message(chat.id, "Произошла ошибка при отправке выжимки.")
-                 except Exception: pass
+                # --- ИЗМЕНЕНИЕ: Отправляем тело саммари с ParseMode.MARKDOWN ---
+                try:
+                    await context.bot.send_message(
+                        chat.id,
+                        raw_summary_content,
+                        parse_mode=ParseMode.MARKDOWN # Указываем Markdown
+                    )
+                    # --- ИЗМЕНЕНИЕ: Обновляем лог ---
+                    logger.info(f"Summary (Markdown body) sent for period '{period_key}' in chat {chat.id}")
+                    # -----------------------------------
+                except (BadRequest, TelegramError) as send_error:
+                    logger.error(f"Failed to send summary body with Markdown. Error: {send_error}. Trying without parse_mode...")
+                    try:
+                        # Fallback: пытаемся отправить как простой текст
+                        await context.bot.send_message(chat.id, raw_summary_content)
+                        logger.info(f"Summary (Plain text fallback) sent for period '{period_key}' in chat {chat.id}")
+                    except Exception as fallback_err:
+                        logger.error(f"Failed to send summary body even as plain text: {fallback_err}")
+                        await notify_owner(context=context, message="Не удалось отправить тело саммари (даже как простой текст после ошибки Markdown)", chat_id=chat.id, operation="send_summary_fallback", exception=fallback_err, important=True)
+                # ----------------------------------------------------------------
 
-            # Отправляем примечание от прокси, если оно было (в HTML)
-            if error_msg:
-                 try: await context.bot.send_message(chat.id, get_text("proxy_note", chat_lang, note=error_msg), parse_mode=ParseMode.HTML)
-                 except Exception as note_err: logger.warning(f"Failed to send summary proxy note: {note_err}")
+                # Отправляем примечание от прокси, если оно было (в HTML)
+                if error_msg_from_proxy:
+                     try: await context.bot.send_message(chat.id, get_text("proxy_note", chat_lang, note=error_msg_from_proxy), parse_mode=ParseMode.HTML)
+                     except Exception as note_err: logger.warning(f"Failed to send summary proxy note: {note_err}")
 
         else:
-            # Ошибка генерации саммари
-            logger.warning(f"Failed to generate summary for period '{period_key}' in chat {chat.id}. Reason: {error_msg}")
-            final_error_text = get_text("summarize_failed", chat_lang, error=error_msg or 'Unknown')
-            await notify_owner(
-                context=context, message=f"Ошибка генерации саммари ({period_key}): {error_msg}",
-                chat_id=chat.id, user_id=user.id, operation="generate_summary", important=True
-            )
-            # Отправляем сообщение об ошибке генерации (в HTML)
-            try:
-                await context.bot.send_message(chat.id, final_error_text, parse_mode=ParseMode.HTML)
-            except Exception as err_send_err:
-                logger.error(f"Failed to send summary generation error message: {err_send_err}")
+            # Ошибка генерации саммари (отправляем в HTML)
+            # ... (код обработки ошибки генерации без изменений) ...
+            logger.warning(f"Failed to generate summary for period '{period_key}' in chat {chat.id}. Reason: {error_msg_from_proxy}")
+            final_error_text = get_text("summarize_failed", chat_lang, error=error_msg_from_proxy or 'Unknown')
+            await notify_owner(context=context, message=f"Ошибка генерации саммари ({period_key}): {error_msg_from_proxy}", chat_id=chat.id, user_id=user.id, operation="generate_summary", important=True)
+            if context.bot: # Проверяем наличие бота
+                try: await context.bot.send_message(chat.id, final_error_text, parse_mode=ParseMode.HTML)
+                except Exception as err_send_err: logger.error(f"Failed to send summary generation error message: {err_send_err}")
 
+    # ... (обработка внешних ошибок TelegramError и Exception без изменений) ...
     except Exception as e:
-        # Ловим любые другие неожиданные ошибки на этапе обработки результата
         logger.exception(f"Unexpected error processing summary result for chat {chat.id}:")
         await notify_owner(context=context, message=f"Unexpected error processing summary result", chat_id=chat.id, user_id=user.id, operation="process_summary", exception=e, important=True)
-        try: await context.bot.send_message(chat.id, get_text("error_db_generic", chat_lang))
-        except Exception: pass
+        if context.bot: # Проверяем наличие бота
+            try: await context.bot.send_message(chat.id, get_text("error_db_generic", chat_lang))
+            except Exception: pass
 
 # =============================================================================
 # ОБРАБОТЧИК СООБЩЕНИЙ
