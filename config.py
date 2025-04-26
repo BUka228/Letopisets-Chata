@@ -45,6 +45,48 @@ SUPPORTED_GENRES = {
     'news_report': 'Новостной репортаж'
 }
 
+
+PURGE_JOB_INTERVAL_HOURS = int(os.getenv("PURGE_JOB_INTERVAL_HOURS", "24")) 
+
+DEFAULT_RETENTION_DAYS = int(os.getenv("DEFAULT_RETENTION_DAYS", "90"))
+
+# --- НОВОЕ: Личности Летописца ---
+SUPPORTED_PERSONALITIES = {
+    'neutral': 'Нейтральный', # Имя для localization
+    'wise': 'Мудрый Старец',
+    'sarcastic': 'Саркастичный Наблюдатель',
+    'poet': 'Поэт-Романтик',
+}
+DEFAULT_PERSONALITY = 'neutral'
+
+# --- НОВОЕ: Форматы Вывода ---
+SUPPORTED_OUTPUT_FORMATS = { 'story': 'История', 'digest': 'Дайджест' }
+# --- ВОТ ЭТА СТРОКА ДОЛЖНА БЫТЬ ---
+DEFAULT_OUTPUT_FORMAT = 'story'
+
+# --- НОВОЕ: Настройки Вмешательств ---
+INTERVENTION_ENABLED_DEFAULT = False # ВЫКЛЮЧЕНО ПО УМОЛЧАНИЮ!
+
+
+# Пределы
+INTERVENTION_MIN_COOLDOWN_MIN = 60      # Минимальный кулдаун - 1 час
+INTERVENTION_MAX_COOLDOWN_MIN = 60*24*7 # Максимальный кулдаун - 1 неделя
+INTERVENTION_MIN_MIN_MSGS = 3           # Минимум 3 сообщения для реакции
+INTERVENTION_MAX_MIN_MSGS = 50          # Максимум 50 сообщений
+INTERVENTION_MIN_TIMESPAN_MIN = 5       # Минимальное окно проверки - 5 минут
+INTERVENTION_MAX_TIMESPAN_MIN = 120     # Максимальное окно проверки - 2 часа
+
+# Значения по умолчанию (если в БД NULL)
+INTERVENTION_DEFAULT_COOLDOWN_MIN = 180 # 3 часа
+INTERVENTION_DEFAULT_MIN_MSGS = 5
+INTERVENTION_DEFAULT_TIMESPAN_MIN = 15
+
+# Другие настройки вмешательств
+INTERVENTION_PROMPT_MESSAGE_COUNT = 5 # Сколько последних сообщ. давать ИИ
+INTERVENTION_MAX_RETRY = 1 # Макс. 1 повтор для генерации вмешательства
+INTERVENTION_TIMEOUT_SEC = 10 # Короткий таймаут для ИИ
+
+
 COMMON_TIMEZONES = {
     "UTC": "UTC±00:00",
     "Europe/London": "Лондон (GMT+0/GMT+1)",
