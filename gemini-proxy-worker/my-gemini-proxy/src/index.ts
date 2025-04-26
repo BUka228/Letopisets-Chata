@@ -1,5 +1,4 @@
 // src/index.ts
-import { Buffer } from 'node:buffer'; // Используем Buffer, если нужно будет работать с бинарными данными (хотя base64 строки достаточно)
 
 // Интерфейс для входящих данных от бота
 interface BotRequestData {

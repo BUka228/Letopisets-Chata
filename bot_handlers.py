@@ -6,7 +6,7 @@ import time
 import re
 import pytz
 from typing import Optional, Dict, Any, Tuple
-from utils import download_images, MAX_PHOTOS_TO_ANALYZE, notify_owner
+from utils import download_images, MAX_PHOTOS_TO_ANALYZE, notify_owner, is_user_admin
 # Импорты из Telegram
 from telegram import (
     Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -22,29 +22,45 @@ from telegram.error import TelegramError, BadRequest
 # Импорты из проекта
 import data_manager as dm
 import gemini_client as gc
-from jobs import (
-    download_images, MAX_PHOTOS_TO_ANALYZE, notify_owner,
-)
 from config import (
     SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_TIMEZONE_STR, BOT_OWNER_ID,
-    SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE, COMMON_TIMEZONES # <-- Добавлено сюда
+    SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE, COMMON_TIMEZONES, DATA_FILE # Добавил DATA_FILE для notify_owner
 )
-from localization import get_text, get_chat_lang, update_chat_lang_cache, LOCALIZED_TEXTS
+from localization import (
+    get_text, get_chat_lang, update_chat_lang_cache, LOCALIZED_TEXTS,
+    get_genre_name, get_period_name # <-- Добавлен get_period_name
+)
 from telegram import __version__ as ptb_version
 
 logger = logging.getLogger(__name__)
 # bot_start_time убран отсюда, берем из context.application.bot_data
 
 # --- Константы для состояний ConversationHandler ---
-SELECTING_LANG, AWAITING_TIME, SELECTING_TZ = map(str, range(3)) 
+SELECTING_LANG, AWAITING_TIME, SELECTING_TZ, SELECTING_GENRE = map(str, range(4))
 # --- Константы для Callback Data ---
 CB_TOGGLE_STATUS = "settings_toggle_status"
 CB_CHANGE_LANG = "settings_change_lang"
 CB_CHANGE_TIME = "settings_change_time"
 CB_CHANGE_TZ = "settings_change_tz" 
+CB_CHANGE_GENRE = "settings_change_genre" # <-- Новая константа
+CB_PREFIX_SET_GENRE = "conv_setgenre_" # <-- Префикс для кнопок жанров
 CB_SET_TIME_DEFAULT = "set_time_default"
 CB_CANCEL_CONV = "conv_cancel"
 CB_SHOW_SETTINGS = "show_settings" # Для кнопки в /start
+
+CB_PREFIX_SUMMARIZE = "summary_"
+CB_SUMMARIZE_TODAY = CB_PREFIX_SUMMARIZE + "today"
+CB_SUMMARIZE_LAST_1H = CB_PREFIX_SUMMARIZE + "last_1h"
+CB_SUMMARIZE_LAST_3H = CB_PREFIX_SUMMARIZE + "last_3h"
+CB_SUMMARIZE_LAST_24H = CB_PREFIX_SUMMARIZE + "last_24h"
+
+SUPPORTED_GENRES = {
+    'default': 'Стандартный', # Отображаемое имя здесь не так важно, берем из localization
+    'humor': 'Юмористический',
+    'detective': 'Детективный',
+    'fantasy': 'Фэнтезийный',
+    'news_report': 'Новостной репортаж'
+}
 
 # =============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -179,30 +195,29 @@ async def display_settings(
 # =============================================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (код без изменений, но обновим кнопки) ...
-    user = update.effective_user; chat = update.effective_chat; 
+    user = update.effective_user; chat = update.effective_chat;
     if not user or not chat: return
     chat_lang = await get_chat_lang(chat.id); settings = dm.get_chat_settings(chat.id); status_key = "settings_enabled" if settings.get('enabled', True) else "settings_disabled"; status_text = get_text(status_key, chat_lang).split(': ')[-1]
-    # --- ИЗМЕНЕНО: Используем helper для форматирования времени ---
     chat_tz = dm.get_chat_timezone(chat.id)
     default_local_time = format_time_for_chat(SCHEDULE_HOUR, SCHEDULE_MINUTE, chat_tz)
-    # ----------------------------------------------------------
     logger.info(f"User {user.id} started bot in chat {chat.id}")
+    # --- ИЗМЕНЕНО: Добавляем кнопку жанра ---
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚙️ " + get_text("cmd_story_settings_desc", chat_lang), callback_data=CB_SHOW_SETTINGS)],
-        [InlineKeyboardButton("🌐 " + get_text("cmd_language_desc", chat_lang), callback_data=CB_CHANGE_LANG),
-         InlineKeyboardButton("🌍 " + get_text("cmd_set_timezone_desc", chat_lang), callback_data=CB_CHANGE_TZ)] # Добавили кнопку TZ
+        [
+            InlineKeyboardButton("🌐 " + get_text("cmd_language_desc", chat_lang), callback_data=CB_CHANGE_LANG),
+            InlineKeyboardButton("🌍 " + get_text("cmd_set_timezone_desc", chat_lang), callback_data=CB_CHANGE_TZ)
+        ],
+        # --- НОВАЯ КНОПКА ---
+        [InlineKeyboardButton("🎭 " + get_text("settings_button_genre", chat_lang), callback_data=CB_CHANGE_GENRE)]
     ])
     await update.message.reply_html(
         get_text("start_message", chat_lang, user_mention=user.mention_html(), chat_title=f"<i>'{chat.title}'</i>" if chat.title else get_text('private_chat', chat_lang),
-                 # --- ИЗМЕНЕНО: Показываем локальное время ---
                  schedule_time=default_local_time,
-                 # -----------------------------------------
-                 schedule_tz=SCHEDULE_TIMEZONE_STR, # Оставляем UTC как базовый пояс
+                 schedule_tz=SCHEDULE_TIMEZONE_STR,
                  status=f"<b>{status_text}</b>"),
         reply_markup=markup
     )
-    # Установка команд теперь в post_init
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # ... (код без изменений, но добавляем команду /set_timezone) ...
@@ -220,79 +235,76 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 async def generate_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat = update.effective_chat
-    if not user or not chat or not update.message:
+    user = update.effective_user; chat = update.effective_chat
+    if not user or not chat or not update.message: return
+
+    chat_lang = await get_chat_lang(chat.id)
+    messages_current = dm.get_messages_for_chat(chat.id) # Берем все сообщения для генерации по запросу
+
+    if not messages_current:
+        await update.message.reply_html(get_text("generating_now_no_messages", chat_lang))
         return
 
-    # ... (код получения сообщений, вычисления photo_info_str, msg_count_str) ...
-    chat_lang = await get_chat_lang(chat.id)
-    messages_current = dm.get_messages_for_chat(chat.id)
     photo_count = sum(1 for m in messages_current if m.get('type') == 'photo')
     photo_process_limit = min(photo_count, MAX_PHOTOS_TO_ANALYZE)
     photo_info_str = get_text("photo_info_text", chat_lang, count=photo_process_limit) if photo_count > 0 else ""
     msg_count_str = str(len(messages_current))
 
-    if context.bot:
-        await context.bot.send_chat_action(chat_id=chat.id, action=tg_constants.ChatAction.TYPING)
+    if context.bot: await context.bot.send_chat_action(chat_id=chat.id, action=tg_constants.ChatAction.TYPING)
     status_message = await update.message.reply_html(
         get_text("generating_now", chat_lang, msg_count=msg_count_str, photo_info=photo_info_str)
     )
 
     story = None
     error_msg = None
-    sent_story_message = None # Для хранения ID сообщения с историей
+    sent_story_message = None
     try:
+        # --- ИЗМЕНЕНО: Получаем жанр чата ---
+        chat_genre = dm.get_chat_genre(chat.id)
+        logger.info(f"[Chat {chat.id}] Generating story on demand with genre: {chat_genre}")
+
         downloaded_images = await download_images(
             context, messages_current, chat.id, MAX_PHOTOS_TO_ANALYZE
         )
-        prepared_content = gc.prepare_story_parts(messages_current, downloaded_images)
-        story, error_msg = await gc.safe_generate_story(prepared_content)
+        # --- ИЗМЕНЕНО: Передаем жанр ---
+        story, error_msg = await gc.safe_generate_story(messages_current, downloaded_images, chat_genre)
 
+        # ... (остальная часть - отправка заголовка, истории, кнопок, обработка ошибок - без изменений) ...
+        # ----- НАЧАЛО БЛОКА ОТПРАВКИ (без изменений) -----
         if story:
             header_key = "story_ready_header"
             photo_note_str_res = get_text("photo_info_text", chat_lang, count=photo_process_limit) if downloaded_images else ""
             final_message_header = get_text(header_key, chat_lang, photo_info=photo_note_str_res)
-
-            # --- ИЗМЕНЕНО ЗДЕСЬ: Отправляем/редактируем заголовок отдельно ---
             try:
-                # Пытаемся отредактировать сообщение "Анализирую..." на заголовок
                 await status_message.edit_text(final_message_header, parse_mode=ParseMode.HTML)
-            except BadRequest: # Если не изменилось или ошибка
-                 # Отправляем заголовок новым сообщением
+            except BadRequest:
                  await context.bot.send_message(chat_id=chat.id, text=final_message_header, parse_mode=ParseMode.HTML)
-                 # Удаляем старое сообщение "Анализирую..."
                  try: await status_message.delete()
-                 except Exception: pass # Игнорируем, если не удалось удалить
-            # ---------------------------------------------------------------
+                 except Exception: pass
 
-            # --- Отправляем историю с кнопками (как отдельное сообщение) ---
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("👍", callback_data="feedback_good_placeholder"),
                 InlineKeyboardButton("👎", callback_data="feedback_bad_placeholder")
             ]])
             MAX_MSG_LEN = 4096
-            if len(story) > MAX_MSG_LEN: # Разбиваем только историю
+            if len(story) > MAX_MSG_LEN:
                 logger.warning(f"/generate_now story too long chat={chat.id}, splitting.")
                 parts = [story[j:j+MAX_MSG_LEN] for j in range(0, len(story), MAX_MSG_LEN)]
                 for k, part in enumerate(parts):
                     current_reply_markup = keyboard if k == len(parts) - 1 else None
-                    # Отправляем часть истории как Markdown
                     sent_story_message = await context.bot.send_message(
                         chat_id=chat.id, text=part,
                         reply_markup=current_reply_markup,
-                        parse_mode=ParseMode.MARKDOWN # Используем Markdown v1
+                        parse_mode=ParseMode.MARKDOWN
                     )
                     await asyncio.sleep(0.5)
             else:
-                # Отправляем историю одним сообщением как Markdown
                 sent_story_message = await context.bot.send_message(
                     chat_id=chat.id, text=story,
                     reply_markup=keyboard,
-                    parse_mode=ParseMode.MARKDOWN # Используем Markdown v1
+                    parse_mode=ParseMode.MARKDOWN
                 )
 
-            # Обновляем кнопки с ID сообщения истории
             if sent_story_message:
                  keyboard_updated = InlineKeyboardMarkup([[
                      InlineKeyboardButton("👍", callback_data=f"feedback_good_{sent_story_message.message_id}"),
@@ -303,39 +315,48 @@ async def generate_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                          chat_id=chat.id, message_id=sent_story_message.message_id,
                          reply_markup=keyboard_updated
                      )
-                 except BadRequest: pass # Игнорируем, если кнопки уже нажаты/удалены
+                 except BadRequest: pass
                  except TelegramError as e: logger.warning(f"Error updating feedback buttons: {e}")
-            # ---------------------------------------------------------------
 
             logger.info(f"Story sent chat={chat.id}")
             if error_msg:
-                try: await context.bot.send_message(chat_id=chat.id, text=get_text("proxy_note", chat_lang, note=error_msg))
+                try:
+                    await context.bot.send_message(chat_id=chat.id, text=get_text("proxy_note", chat_lang, note=error_msg))
                 except Exception as e_note: logger.warning(f"Failed proxy note: {e_note}")
-
+        # ----- КОНЕЦ БЛОКА ОТПРАВКИ (без изменений) -----
         else: # Если story is None (ошибка генерации)
             logger.warning(f"Failed gen story chat={chat.id}. Reason: {error_msg}")
-            await status_message.edit_text(
-                get_text("generation_failed", chat_lang, error=error_msg or 'Unknown'),
-                parse_mode=ParseMode.HTML # Ошибка в HTML
-            )
+            final_error_msg = get_text("generation_failed", chat_lang, error=error_msg or 'Unknown')
+            # Уведомляем владельца о серьезной ошибке генерации
+            if error_msg and "конфигурации" in error_msg: # Пример критической ошибки
+                 await notify_owner(context=context, message=f"Ошибка генерации истории (по запросу): {error_msg}", chat_id=chat.id, operation="generate_now", important=True)
+            try:
+                await status_message.edit_text(final_error_msg, parse_mode=ParseMode.HTML)
+            except Exception as edit_e:
+                logger.error(f"Failed to edit status message on error: {edit_e}")
+                # Если редактирование не удалось, отправим новым сообщением
+                await update.message.reply_html(final_error_msg)
+
     except Exception as e:
         logger.exception(f"General error in /generate_now chat={chat.id}: {e}")
+        # Уведомляем владельца
+        await notify_owner(context=context, message=f"Критическая ошибка в /generate_now", chat_id=chat.id, operation="generate_now", exception=e, important=True)
         try:
-             await status_message.edit_text(
-                 get_text("error_db_generic", chat_lang), parse_mode=ParseMode.HTML
-             )
-        except Exception as edit_e: logger.error(f"Failed to edit status message on error: {edit_e}")
+             await status_message.edit_text(get_text("error_db_generic", chat_lang), parse_mode=ParseMode.HTML)
+        except Exception as edit_e:
+            logger.error(f"Failed to edit status message on critical error: {edit_e}")
+            await update.message.reply_html(get_text("error_db_generic", chat_lang))
 
 
 async def regenerate_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat = update.effective_chat
-    if not user or not chat or not update.message:
-        return
+    # ... (логика получения сообщений и проверки на их наличие без изменений) ...
+    user = update.effective_user; chat = update.effective_chat
+    if not user or not chat or not update.message: return
 
     chat_lang = await get_chat_lang(chat.id)
     logger.info(f"User {user.username} /regenerate_story chat={chat.id}")
 
+    # Важно: Используем ВСЕ сообщения, сохраненные в БД для этого чата
     messages_current = dm.get_messages_for_chat(chat.id)
     if not messages_current:
         await update.message.reply_html(get_text("regenerate_no_data", chat_lang))
@@ -344,42 +365,42 @@ async def regenerate_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     photo_count = sum(1 for m in messages_current if m.get('type') == 'photo')
     photo_process_limit = min(photo_count, MAX_PHOTOS_TO_ANALYZE)
 
-    if context.bot:
-        await context.bot.send_chat_action(chat_id=chat.id, action=tg_constants.ChatAction.TYPING)
+    if context.bot: await context.bot.send_chat_action(chat_id=chat.id, action=tg_constants.ChatAction.TYPING)
     status_message = await update.message.reply_html(get_text("regenerating", chat_lang))
 
     story = None
     error_msg = None
     sent_story_message = None
     try:
+        # --- ИЗМЕНЕНО: Получаем жанр ---
+        chat_genre = dm.get_chat_genre(chat.id)
+        logger.info(f"[Chat {chat.id}] Regenerating story with genre: {chat_genre}")
+
         downloaded_images = await download_images(
             context, messages_current, chat.id, MAX_PHOTOS_TO_ANALYZE
         )
-        photo_note_str = get_text(
-            "photo_info_text", chat_lang, count=photo_process_limit
-        ) if downloaded_images else ""
-        prepared_content = gc.prepare_story_parts(messages_current, downloaded_images)
-        story, error_msg = await gc.safe_generate_story(prepared_content)
+        photo_note_str = get_text("photo_info_text", chat_lang, count=photo_process_limit) if downloaded_images else ""
+
+        # --- ИЗМЕНЕНО: Передаем жанр ---
+        story, error_msg = await gc.safe_generate_story(messages_current, downloaded_images, chat_genre)
 
         # Удаляем сообщение "Регенерирую..."
         try: await status_message.delete()
         except Exception as e: logger.warning(f"Could not delete 'regenerating' message: {e}")
 
+        # ... (остальная часть - отправка заголовка, истории, кнопок, обработка ошибок - без изменений) ...
+        # ----- НАЧАЛО БЛОКА ОТПРАВКИ (без изменений) -----
         if story:
-            header_key = "story_ready_header"
+            header_key = "story_ready_header" # Используем тот же заголовок, что и /generate_now
             final_message_header = get_text(header_key, chat_lang, photo_info=photo_note_str)
-
-            # --- ИЗМЕНЕНО: Отправляем заголовок отдельно ---
             await update.message.reply_html(final_message_header)
-            # -------------------------------------------
 
-            # --- Отправляем историю с кнопками ---
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("👍", callback_data="feedback_good_placeholder"),
                 InlineKeyboardButton("👎", callback_data="feedback_bad_placeholder")
             ]])
             MAX_MSG_LEN = 4096
-            if len(story) > MAX_MSG_LEN: # Разбиваем только историю
+            if len(story) > MAX_MSG_LEN:
                 logger.warning(f"/regenerate_story story too long chat={chat.id}, splitting.")
                 parts = [story[j:j+MAX_MSG_LEN] for j in range(0, len(story), MAX_MSG_LEN)]
                 for k, part in enumerate(parts):
@@ -387,17 +408,16 @@ async def regenerate_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     sent_story_message = await context.bot.send_message(
                         chat_id=chat.id, text=part,
                         reply_markup=current_reply_markup,
-                        parse_mode=ParseMode.MARKDOWN # Markdown v1
+                        parse_mode=ParseMode.MARKDOWN
                     )
                     await asyncio.sleep(0.5)
             else:
                 sent_story_message = await context.bot.send_message(
                     chat_id=chat.id, text=story,
                     reply_markup=keyboard,
-                    parse_mode=ParseMode.MARKDOWN # Markdown v1
+                    parse_mode=ParseMode.MARKDOWN
                 )
 
-            # Обновляем кнопки
             if sent_story_message:
                  keyboard_updated = InlineKeyboardMarkup([[
                      InlineKeyboardButton("👍", callback_data=f"feedback_good_{sent_story_message.message_id}"),
@@ -414,13 +434,19 @@ async def regenerate_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await context.bot.send_message(
                     chat_id=chat.id, text=get_text("proxy_note", chat_lang, note=error_msg)
                 )
+        # ----- КОНЕЦ БЛОКА ОТПРАВКИ (без изменений) -----
         else: # Если история не сгенерировалась
-            await update.message.reply_html( # Отвечаем на исходное сообщение /regenerate_story
-                get_text("generation_failed", chat_lang, error=error_msg or 'Unknown')
-            )
+            logger.warning(f"Failed regenerate story chat={chat.id}. Reason: {error_msg}")
+            final_error_msg = get_text("generation_failed", chat_lang, error=error_msg or 'Unknown')
+            # Уведомляем владельца
+            if error_msg and "конфигурации" in error_msg:
+                 await notify_owner(context=context, message=f"Ошибка регенерации истории: {error_msg}", chat_id=chat.id, operation="regenerate_story", important=True)
+            await update.message.reply_html(final_error_msg)
+
     except Exception as e:
         logger.exception(f"Error in /regenerate_story chat={chat.id}: {e}")
-        # Отвечаем на исходное сообщение /regenerate_story
+        # Уведомляем владельца
+        await notify_owner(context=context, message=f"Критическая ошибка в /regenerate_story", chat_id=chat.id, operation="regenerate_story", exception=e, important=True)
         await update.message.reply_html(get_text("error_db_generic", chat_lang))
 
 async def ask_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -527,6 +553,40 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ptb_version=ptb_version
     )
     await update.message.reply_html(status_text)
+    
+
+async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Предлагает пользователю выбрать период для саммари."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or not update.message:
+        return
+    # Саммари имеет смысл только в группах
+    if chat.type not in [tg_constants.ChatType.GROUP, tg_constants.ChatType.SUPERGROUP]:
+        # В личке можно сделать саммари другого чата, но это усложнение, пока пропускаем
+        # await update.message.reply_text("Эта команда работает только в группах.")
+        return # Просто игнорируем в личке
+
+    chat_lang = await get_chat_lang(chat.id)
+
+    # Создаем кнопки выбора периода
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(get_text("summarize_button_today", chat_lang), callback_data=CB_SUMMARIZE_TODAY),
+            InlineKeyboardButton(get_text("summarize_button_last_1h", chat_lang), callback_data=CB_SUMMARIZE_LAST_1H),
+        ],
+        [
+            InlineKeyboardButton(get_text("summarize_button_last_3h", chat_lang), callback_data=CB_SUMMARIZE_LAST_3H),
+            InlineKeyboardButton(get_text("summarize_button_last_24h", chat_lang), callback_data=CB_SUMMARIZE_LAST_24H),
+        ],
+        # Можно добавить кнопку "Отмена"
+        # [InlineKeyboardButton("🚫 Отмена", callback_data="cancel_summary_selection")]
+    ])
+
+    await update.message.reply_html(
+        text=get_text("summarize_prompt_period", chat_lang),
+        reply_markup=keyboard
+    )
 
 # =============================================================================
 # CONVERSATION HANDLERS (ДЛЯ ЯЗЫКА И ВРЕМЕНИ)
@@ -730,9 +790,109 @@ async def set_time_default_button(update: Update, context: ContextTypes.DEFAULT_
     context.user_data.pop('conv_type', None)
     return ConversationHandler.END
 
+
+# --- НОВЫЙ Диалог выбора Жанра ---
+async def ask_genre(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Начинает диалог выбора жанра (entry point)."""
+    query = update.callback_query
+    user = update.effective_user or (query.from_user if query else None)
+    chat = update.effective_chat or (query.message.chat if query and query.message else None)
+    if not user or not chat: return ConversationHandler.END
+    context.user_data['conv_type'] = 'genre' # Помечаем тип диалога
+
+    # Проверка прав админа (только при входе через кнопку)
+    if query:
+        await query.answer() # Отвечаем на нажатие кнопки
+        is_admin = await is_user_admin(chat.id, user.id, context)
+        chat_lang = await get_chat_lang(chat.id) # Язык нужен здесь
+        if not is_admin:
+            # Сообщаем, что только админ может менять
+            # Не редактируем сообщение, а отправляем alert
+            await query.answer(get_text("admin_only", chat_lang), show_alert=True)
+            return ConversationHandler.END # Завершаем, если не админ
+
+    # Права проверены (или вход через команду - не проверяем), продолжаем
+    chat_lang = await get_chat_lang(chat.id) # Получаем язык еще раз на всякий случай
+    buttons = []
+    # Создаем кнопки для каждого жанра
+    for genre_key in SUPPORTED_GENRES.keys():
+        genre_name = get_genre_name(genre_key, chat_lang) # Получаем локализованное имя
+        button_text = get_text("genre_select_button_text", chat_lang, genre_name=genre_name)
+        buttons.append([InlineKeyboardButton(button_text, callback_data=f"{CB_PREFIX_SET_GENRE}{genre_key}")])
+
+    # Кнопка отмены
+    buttons.append([InlineKeyboardButton("🚫 " + get_text("genre_set_cancel", chat_lang), callback_data=CB_CANCEL_CONV)])
+    keyboard_markup = InlineKeyboardMarkup(buttons)
+    text = get_text("genre_select", chat_lang)
+
+    # Отправляем или редактируем сообщение
+    if query and query.message: # Если вызвано кнопкой, редактируем сообщение настроек
+        try:
+             await query.edit_message_text(text=text, reply_markup=keyboard_markup, parse_mode=ParseMode.HTML)
+        except BadRequest as e:
+            logger.warning(f"Failed to edit message in ask_genre: {e}")
+            # Если не удалось отредактировать, отправим новым (маловероятно)
+            if update.effective_message:
+                 await update.effective_message.reply_html(text, reply_markup=keyboard_markup)
+    elif update.message: # Если вызвано командой /set_genre (если добавим)
+        await update.message.reply_html(text, reply_markup=keyboard_markup)
+
+    return SELECTING_GENRE # Переходим в состояние выбора жанра
+
+async def set_genre_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор жанра в диалоге."""
+    query = update.callback_query
+    if not query or not query.message: return ConversationHandler.END
+    await query.answer() # Отвечаем на нажатие кнопки
+    user = query.from_user; chat = query.message.chat
+    if not user or not chat: return ConversationHandler.END
+
+    # Проверка прав админа еще раз (на всякий случай)
+    is_admin = await is_user_admin(chat.id, user.id, context)
+    chat_lang = await get_chat_lang(chat.id)
+    if not is_admin:
+        # Редактируем сообщение, говоря что только админ может
+        try:
+            await query.edit_message_text(get_text("admin_only", chat_lang), reply_markup=None)
+        except BadRequest: pass # Игнорируем ошибку, если сообщение уже изменилось
+        return ConversationHandler.END
+
+    # Извлекаем ключ жанра из callback_data
+    genre_key = query.data.removeprefix(CB_PREFIX_SET_GENRE)
+
+    if genre_key in SUPPORTED_GENRES:
+        success = dm.update_chat_setting(chat.id, 'story_genre', genre_key)
+        # chat_lang уже получен выше
+        if success:
+            genre_name = get_genre_name(genre_key, chat_lang)
+            text = get_text("genre_set_success", chat_lang, genre_name=genre_name)
+            try:
+                # Редактируем сообщение с подтверждением
+                await query.edit_message_text(text=text, reply_markup=None, parse_mode=ParseMode.HTML)
+                # Возвращаем пользователя к основному меню настроек после выбора
+                # await display_settings(update, context, chat.id, query.message.message_id) # Раскомментировать, если нужно вернуться в настройки
+            except BadRequest as e:
+                logger.warning(f"Failed to edit message in set_genre_conv: {e}")
+                # Отправим новым сообщением, если редактирование не удалось
+                await context.bot.send_message(chat_id=chat.id, text=text, parse_mode=ParseMode.HTML)
+        else:
+            # Ошибка БД
+            await context.bot.send_message(chat_id=chat.id, text=get_text("error_db_generic", chat_lang))
+            await notify_owner(context=context, message="Не удалось обновить жанр в БД", chat_id=chat.id, user_id=user.id, operation="set_genre", important=True)
+            try:
+                 await query.edit_message_reply_markup(reply_markup=None) # Убираем кнопки
+            except BadRequest: pass
+    else:
+        logger.warning(f"Invalid genre key received: {genre_key} from user {user.id} in chat {chat.id}")
+        await query.answer(text="Invalid genre selected.", show_alert=True) # Уведомляем пользователя
+
+    context.user_data.pop('conv_type', None) # Очищаем состояние диалога
+    return ConversationHandler.END # Завершаем диалог
+
+
 # --- Общая функция отмены диалога ---
 async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отменяет текущий диалог (установки языка или времени)."""
+    """Отменяет текущий диалог (язык, время, таймзона, жанр)."""
     query = update.callback_query
     user = update.effective_user or (query.from_user if query else None)
     chat = update.effective_chat or (query.message.chat if query and query.message else None)
@@ -740,24 +900,36 @@ async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     chat_lang = await get_chat_lang(chat.id)
     conv_type = context.user_data.get('conv_type')
-    cancel_text_key = "set_time_cancelled" if conv_type == 'time' else "set_language_cancelled"
+    # --- ИЗМЕНЕНО: Добавляем текст отмены для жанра ---
+    cancel_text_key = {
+        'time': "set_time_cancelled",
+        'lang': "set_language_cancelled",
+        'tz': "timezone_set_cancel", # Используем ключ отмены ТЗ
+        'genre': "genre_set_cancel"  # Новый ключ для жанра
+    }.get(conv_type, "Операция отменена.") # Общий fallback
+
     cancel_text = get_text(cancel_text_key, chat_lang)
 
     if query:
         await query.answer()
         try:
+            # Пытаемся отредактировать сообщение, чтобы показать текст отмены
             await query.edit_message_text(text=cancel_text, reply_markup=None)
-        except BadRequest: # Сообщение могло быть удалено
-            logger.debug("Failed to edit message on conversation cancel (message likely deleted).")
-            # Отправим новое сообщение, если редактирование не удалось
-            if update.effective_message: # Если есть к чему привязаться
-                 await update.effective_message.reply_text(cancel_text)
+            # Опционально: можно вернуть пользователя к главному меню настроек
+            # if conv_type in ['lang', 'time', 'tz', 'genre']:
+            #     await display_settings(update, context, chat.id, query.message.message_id)
+        except BadRequest:
+            logger.debug("Failed to edit message on conversation cancel (message likely deleted or unchanged).")
+            # Если редактирование не удалось, может, ничего и не нужно делать
+        except TelegramError as e:
+            logger.warning(f"TelegramError editing message on cancel: {e}")
+
     elif update.message:
         # Отмена командой /cancel
         await update.message.reply_text(cancel_text)
 
     context.user_data.pop('conv_type', None) # Очищаем состояние в любом случае
-    logger.info(f"Conversation cancelled by user {user.id} in chat {chat.id}")
+    logger.info(f"Conversation '{conv_type}' cancelled by user {user.id} in chat {chat.id}")
     return ConversationHandler.END
 
 
@@ -769,36 +941,42 @@ async def settings_button_handler(update: Update, context: ContextTypes.DEFAULT_
     """Обрабатывает кнопки из сообщения /story_settings (кроме тех, что начинают диалог)."""
     query = update.callback_query
     if not query or not query.message: return
-    await query.answer()
+    # Ответ на query перенесен внутрь условий, чтобы избежать двойного ответа
     user = query.from_user; chat = query.message.chat
     if not user or not chat: return
     chat_lang = await get_chat_lang(chat.id); data = query.data
 
     logger.info(f"User {user.id} pressed settings button: {data} in chat {chat.id}")
 
+    # Проверка админских прав для кнопок настроек
     is_admin = await is_user_admin(chat.id, user.id, context)
     if not is_admin:
         await query.answer(text=get_text("admin_only", chat_lang), show_alert=True)
         return
 
     if data == CB_TOGGLE_STATUS:
+        await query.answer() # Отвечаем на колбек
         settings = dm.get_chat_settings(chat.id)
         new_status = not settings.get('enabled', True) # Инвертируем
         success = dm.update_chat_setting(chat.id, 'enabled', new_status)
         if success:
-            # Обновляем сообщение с настройками
             await display_settings(update, context, chat.id, query.message.message_id)
-            await query.answer( # Даем короткое подтверждение
+            # Даем короткое подтверждение во всплывающем уведомлении
+            await query.answer(
                 text=get_text("story_enabled", chat_lang) if new_status else get_text("story_disabled", chat_lang)
             )
         else:
-            # Ошибка БД - сообщаем пользователю через alert
+            # Ошибка БД - сообщаем пользователю через alert и владельцу
             await query.answer(text=get_text("error_db_generic", chat_lang), show_alert=True)
+            await notify_owner(context=context, message="Не удалось обновить статус (enabled) в БД", chat_id=chat.id, user_id=user.id, operation="toggle_status", important=True)
 
     elif data == CB_SHOW_SETTINGS: # Кнопка из /start
-         await display_settings(update, context, chat.id)
-         try: await query.message.delete() # Удаляем сообщение /start с кнопкой
-         except Exception as e: logger.warning(f"Could not delete /start message: {e}")
+         # Не отвечаем на query здесь, так как display_settings сделает edit
+         await display_settings(update, context, chat.id, query.message.message_id)
+         # Не удаляем исходное сообщение /start, так как оно могло содержать важную инфу
+         # Можно просто убрать кнопки из него, если нужно
+         # try: await query.message.edit_reply_markup(reply_markup=None)
+         # except Exception as e: logger.warning(f"Could not edit /start message markup: {e}")
 
 
 async def feedback_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -841,6 +1019,119 @@ async def feedback_button_handler(update: Update, context: ContextTypes.DEFAULT_
         else:
             logger.warning(f"Incorrect feedback format: {data}")
             await query.answer(text="Error processing feedback.")
+            
+            
+async def summary_period_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатие кнопок выбора периода для саммари."""
+    query = update.callback_query
+    if not query or not query.message: return
+    await query.answer() # Отвечаем на колбек быстро
+
+    user = query.from_user
+    chat = query.message.chat
+    if not user or not chat: return
+
+    chat_lang = await get_chat_lang(chat.id)
+    period_key = query.data.removeprefix(CB_PREFIX_SUMMARIZE) # Получаем ключ периода (today, last_1h, etc.)
+
+    logger.info(f"User {user.id} requested summary for period '{period_key}' in chat {chat.id}")
+
+    # 1. Определяем временной интервал и получаем сообщения
+    messages_to_summarize: List[Dict[str, Any]] = []
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    period_start_utc: Optional[datetime.datetime] = None
+
+    if period_key == "today":
+        period_start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        messages_to_summarize = dm.get_messages_for_chat_since(chat.id, period_start_utc)
+    elif period_key == "last_1h":
+        period_start_utc = now_utc - datetime.timedelta(hours=1)
+        messages_to_summarize = dm.get_messages_for_chat_since(chat.id, period_start_utc)
+    elif period_key == "last_3h":
+        period_start_utc = now_utc - datetime.timedelta(hours=3)
+        messages_to_summarize = dm.get_messages_for_chat_since(chat.id, period_start_utc)
+    elif period_key == "last_24h":
+        period_start_utc = now_utc - datetime.timedelta(hours=24)
+        messages_to_summarize = dm.get_messages_for_chat_since(chat.id, period_start_utc)
+    else:
+        logger.warning(f"Unknown summary period key: {period_key}")
+        await context.bot.send_message(chat.id, "Ошибка: Неизвестный период для саммари.")
+        # Убираем кнопки из исходного сообщения
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest: pass
+        return
+
+    # 2. Проверяем, есть ли сообщения
+    if not messages_to_summarize:
+        logger.info(f"No messages found for summary period '{period_key}' in chat {chat.id}")
+        await query.edit_message_text(
+            text=get_text("summarize_no_messages", chat_lang),
+            reply_markup=None # Убираем кнопки
+        )
+        return
+
+    # 3. Показываем статус "Генерирую..."
+    status_text = get_text("summarize_generating", chat_lang)
+    try:
+        await query.edit_message_text(text=status_text, reply_markup=None) # Убираем кнопки
+    except BadRequest as e:
+        # Если сообщение не изменилось (например, два быстрых нажатия) - игнорируем
+        if "Message is not modified" not in str(e):
+            logger.warning(f"Failed to edit message to 'generating summary': {e}")
+            # Если редактировать не удалось, отправим новым сообщением
+            await context.bot.send_message(chat.id, status_text)
+
+
+    # 4. Генерируем саммари
+    summary_text, error_msg = await gc.safe_generate_summary(messages_to_summarize)
+
+    # 5. Отправляем результат
+    try:
+        if summary_text:
+            period_name = get_period_name(period_key, chat_lang)
+            header = get_text("summarize_header", chat_lang, period_name=period_name)
+            final_message = header + summary_text
+            # Редактируем сообщение "Генерирую..." на финальное саммари
+            # (или отправляем новым, если редактирование невозможно)
+            try:
+                await query.edit_message_text(final_message, parse_mode=ParseMode.HTML)
+            except (BadRequest, TelegramError) as edit_error:
+                 logger.warning(f"Failed to edit message with summary result: {edit_error}. Sending as new message.")
+                 # Отправляем как ответ на исходную команду /summarize (если возможно)
+                 if query.message.reply_to_message:
+                     await query.message.reply_to_message.reply_html(final_message)
+                 else: # Или просто в чат
+                      await context.bot.send_message(chat.id, final_message, parse_mode=ParseMode.HTML)
+            logger.info(f"Summary sent for period '{period_key}' in chat {chat.id}")
+            if error_msg: # Отправляем примечание, если оно было (маловероятно для саммари)
+                 try: await context.bot.send_message(chat.id, get_text("proxy_note", chat_lang, note=error_msg))
+                 except Exception: pass
+        else:
+            # Ошибка генерации
+            logger.warning(f"Failed to generate summary for period '{period_key}' in chat {chat.id}. Reason: {error_msg}")
+            final_error_text = get_text("summarize_failed", chat_lang, error=error_msg or 'Unknown')
+            # Уведомляем владельца о проблеме
+            await notify_owner(
+                context=context, message=f"Ошибка генерации саммари ({period_key}): {error_msg}",
+                chat_id=chat.id, user_id=user.id, operation="generate_summary", important=True
+            )
+            # Редактируем сообщение "Генерирую..." на сообщение об ошибке
+            try:
+                await query.edit_message_text(final_error_text, parse_mode=ParseMode.HTML)
+            except (BadRequest, TelegramError) as edit_error:
+                 logger.warning(f"Failed to edit message with summary error: {edit_error}. Sending as new message.")
+                 if query.message.reply_to_message: await query.message.reply_to_message.reply_html(final_error_text)
+                 else: await context.bot.send_message(chat.id, final_error_text, parse_mode=ParseMode.HTML)
+
+    except TelegramError as e:
+         logger.error(f"Telegram error sending summary/error message for chat {chat.id}: {e}")
+         await notify_owner(context=context, message=f"Telegram error sending summary result", chat_id=chat.id, user_id=user.id, operation="send_summary", exception=e, important=True)
+    except Exception as e:
+        logger.exception(f"Unexpected error processing summary result for chat {chat.id}: {e}")
+        await notify_owner(context=context, message=f"Unexpected error processing summary result", chat_id=chat.id, user_id=user.id, operation="process_summary", exception=e, important=True)
+        # Попробуем сообщить пользователю
+        try: await context.bot.send_message(chat.id, get_text("error_db_generic", chat_lang)) # Общая ошибка
+        except Exception: pass
 
 # =============================================================================
 # ОБРАБОТЧИК СООБЩЕНИЙ

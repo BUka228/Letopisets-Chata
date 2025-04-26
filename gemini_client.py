@@ -1,150 +1,173 @@
 # gemini_client.py
 import logging
-import datetime
 import asyncio
 import httpx
 import base64
 from typing import List, Dict, Union, Tuple, Optional, Any
-# --- НОВОЕ: Импорт для Retries ---
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log # Добавлен before_sleep_log
+
+# Импортируем функции из нового модуля
+import prompt_builder as pb
 
 from config import CLOUDFLARE_WORKER_URL, CLOUDFLARE_AUTH_TOKEN
 
 logger = logging.getLogger(__name__)
+retry_log = logging.getLogger(__name__ + '.retry') # Отдельный логгер для tenacity
 
-ContentPart = Union[str, Dict[str, Any]]
-PreparedContent = List[Union[str, Dict[str, Union[str, bytes]]]]
+# Типы из prompt_builder
+ContentPart = pb.ContentPart
+PreparedContent = pb.PreparedContent
 
-# --- ИЗМЕНЕНО: Улучшенная функция подготовки контента ---
-def prepare_story_parts(messages: List[Dict[str, Any]], images_data: Dict[str, bytes]) -> Optional[PreparedContent]:
-    """
-    Форматирует сообщения и изображения в контент для прокси.
-    Улучшено описание разных типов сообщений.
-    """
-    if not messages: return None
-    try:
-        valid_messages = [m for m in messages if isinstance(m, dict) and 'timestamp' in m]
-        valid_messages.sort(key=lambda x: datetime.datetime.fromisoformat(x['timestamp'].replace('Z', '+00:00')))
-    except Exception as e:
-        logger.warning(f"Не удалось отсортировать сообщения по времени ({e}).", exc_info=True)
-        valid_messages = messages
+# --- Функция prepare_story_parts УДАЛЕНА отсюда ---
+#     Логика теперь в prompt_builder.build_story_content
 
-    content_parts: PreparedContent = []
-    initial_prompt = (
-        f"Ты — ИИ-летописец чата с возможностью анализа изображений. Твоя задача — проанализировать лог сообщений и изображения (обозначенные как [IMAGE N]) за прошедший день. "
-        f"Напиши **связную и интересную историю событий** в чате в 1-3 абзацах. Используй **Markdown** для форматирования:\n"
-        f"- Придумай и используй **жирный заголовок** для истории (например, `**Заголовок Истории**`).\n"
-        f"- Используй абзацы для читаемости.\n"
-        f"- Упоминай пользователей по их *именам* (username) курсивом (например, `*Анна*`).\n"
-        f"- Не цитируй текст дословно, а пересказывай суть.\n"
-        f"- Кратко опиши содержание 1-2 ключевых изображений, если они важны, и упомяни, кто их отправил.\n"
-        f"- Опиши общую атмосферу дня (активный, спокойный, веселый и т.д.). Не выдумывай события.\n\n"
-        f"ЛОГ СООБЩЕНИЙ И ИЗОБРАЖЕНИЙ ЗА ДЕНЬ:\n"
-        f"---------------------------------\n"
-    )
-    content_parts.append(initial_prompt)
-
-    image_counter = 0
-    current_text_block = ""
-
-    for msg in valid_messages:
-        try: dt_utc = datetime.datetime.fromisoformat(msg.get('timestamp','').replace('Z', '+00:00')); ts_str = dt_utc.strftime('%H:%M')
-        except: ts_str = "??:??"
-        user = msg.get('username', 'Неизвестный'); content = msg.get('content', ''); msg_type = msg.get('type'); msg_file_unique_id = msg.get('file_unique_id'); file_name = msg.get('file_name')
-
-        log_entry = f"[{ts_str}] {user}: "
-
-        if msg_type == 'photo' and msg_file_unique_id and msg_file_unique_id in images_data:
-            if current_text_block: content_parts.append(current_text_block.strip()); current_text_block = ""
-            image_counter += 1; image_bytes = images_data[msg_file_unique_id]
-            log_entry += f"отправил(а) изображение [IMAGE {image_counter}]{f' с подписью: «{content}»' if content else ''}\n"
-            content_parts.append(log_entry.strip())
-            content_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
-        else:
-            # Улучшаем описание других типов
-            if msg_type == 'text' and content: log_entry += f"написал(а): \"{content[:150]}{'...' if len(content)>150 else ''}\"\n"
-            elif msg_type == 'video': log_entry += f"отправил(а) видео{f' «{content}»' if content else ''} (содержание неизвестно)\n"
-            elif msg_type == 'sticker': log_entry += f"отправил(а) стикер{f' ({content})' if content else ''}\n"
-            elif msg_type == 'voice': log_entry += f"записал(а) голосовое сообщение\n"
-            elif msg_type == 'video_note': log_entry += f"записал(а) видео-сообщение (кружок)\n"
-            elif msg_type == 'document': log_entry += f"отправил(а) документ '{file_name or 'без имени'}'{f' «{content}»' if content else ''}\n"
-            elif msg_type == 'audio': log_entry += f"отправил(а) аудио '{file_name or 'без имени'}'{f' «{content}»' if content else ''}\n"
-            elif msg_type == 'photo': log_entry += f"отправил(а) фото (не анализируется){f' «{content}»' if content else ''}\n"
-            elif content: log_entry += f"отправил(а) медиа с подписью: «{content}» (тип: {msg_type})\n"
-            else: log_entry += f"отправил(а) сообщение (тип: {msg_type})\n" # Добавили тип для неопознанных
-            current_text_block += log_entry
-
-    if current_text_block: content_parts.append(current_text_block.strip())
-    content_parts.append(f"---------------------------------\nКОНЕЦ ЛОГА.\n\nТеперь, напиши историю дня:\n")
-    if len(content_parts) <= 2: logger.warning("Промпт не содержит данных."); return None
-    return content_parts
-
-# --- НОВОЕ: Функция для проверки, нужно ли повторять запрос ---
+# --- Функция для проверки, нужно ли повторять запрос ---
 def _is_retryable_exception(exception: BaseException) -> bool:
     """Определяет, стоит ли повторять запрос при данной ошибке httpx."""
     # Повторяем при сетевых ошибках и ошибках сервера (5xx)
-    return isinstance(exception, (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError, httpx.ReadTimeout)) or \
-           (isinstance(exception, httpx.HTTPStatusError) and 500 <= exception.response.status_code < 600)
+    if isinstance(exception, (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError, httpx.ReadTimeout, httpx.ReadError, httpx.WriteError)):
+        return True
+    if isinstance(exception, httpx.HTTPStatusError):
+        # Повторяем при 5xx и 429 (слишком много запросов)
+        return 500 <= exception.response.status_code < 600 or exception.response.status_code == 429
+    return False
 
-# --- ИЗМЕНЕНО: Добавлен декоратор @retry ---
+# --- Функция вызова прокси с ретраями ---
 @retry(
-    stop=stop_after_attempt(3),  # Максимум 3 попытки (1 оригинальная + 2 повторные)
-    wait=wait_exponential(multiplier=1, min=2, max=10), # Ждать 2с, 4с перед повторами
-    retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError)), # Условие повтора
-    before_sleep=lambda retry_state: logger.warning(f"Ошибка вызова прокси, повторная попытка #{retry_state.attempt_number} через {retry_state.idle_for:.1f}с...")
+    stop=stop_after_attempt(4),  # Максимум 4 попытки (1 оригинальная + 3 повторные)
+    wait=wait_exponential(multiplier=1.5, min=2, max=15), # Ждать 2с, 5с, 9.5с ~
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)), # Ловим базовые типы httpx
+    retry_error_callback=lambda retry_state: logger.error(
+        f"Не удалось выполнить запрос к прокси после {retry_state.attempt_number} попыток. Последняя ошибка: {retry_state.outcome.exception()}"
+    ),
+    before_sleep=before_sleep_log(retry_log, logging.WARNING) # Используем стандартный логгер tenacity
 )
-async def generate_story_from_proxy(prepared_content: Optional[PreparedContent]) -> Tuple[Optional[str], Optional[str]]:
-    """Отправляет подготовленный контент в прокси Cloudflare Worker с повторными попытками."""
+async def _call_proxy(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Внутренняя функция для вызова прокси с обработкой retry."""
     if not CLOUDFLARE_WORKER_URL or not CLOUDFLARE_AUTH_TOKEN:
-        logger.error("URL/токен прокси не настроены.")
-        return None, "Ошибка конфигурации: не задан URL прокси или токен."
+        logger.critical("URL/токен прокси не настроены в конфигурации!")
+        raise ValueError("Proxy URL or Auth Token is not configured.") # Выбрасываем ошибку, чтобы retry не продолжался
+
+    headers = {"Content-Type": "application/json", "X-Auth-Token": CLOUDFLARE_AUTH_TOKEN}
+    proxy_url = f"{CLOUDFLARE_WORKER_URL.rstrip('/')}/generate"
+
+    logger.info(f"Отправка запроса к прокси: {proxy_url} (размер payload ~{len(str(payload)) // 1024} KB)")
+    async with httpx.AsyncClient(timeout=120.0) as client: # Увеличенный таймаут
+        response = await client.post(proxy_url, json=payload, headers=headers)
+        # Проверяем на ошибки, которые могут требовать retry
+        if not response.is_success and _is_retryable_exception(httpx.HTTPStatusError(request=response.request, response=response)):
+             response.raise_for_status() # Выбросит исключение для retry
+
+        # Если статус не ОК, но не требует retry (например, 400 Bad Request от прокси)
+        if not response.is_success:
+             logger.warning(f"Прокси вернул статус {response.status_code}. Тело ответа: {response.text[:500]}")
+             # Пытаемся парсить JSON даже при ошибке, вдруг там есть поле 'error'
+             try:
+                 return response.json()
+             except Exception:
+                 # Если не JSON, возвращаем общую ошибку
+                 return {"error": f"Proxy returned status {response.status_code} with non-JSON body"}
+
+        # Если статус ОК (2xx)
+        logger.info(f"Успешный ответ ({response.status_code}) получен от прокси.")
+        return response.json()
+
+
+async def generate_via_proxy(prepared_content: Optional[PreparedContent]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Отправляет подготовленный контент (текст + байты изображений) в прокси.
+    Возвращает (сгенерированный_текст, сообщение_об_ошибке_или_примечание).
+    """
     if not prepared_content:
-        logger.info("Нет контента для отправки в прокси."); return "Сегодня было тихо.", None # Изменен ответ
+        logger.info("Нет контента для отправки в прокси.")
+        # Возвращаем нейтральный ответ, если контента не было изначально
+        return "Нет данных для обработки.", None
 
     json_payload_content = []
     try:
         for part in prepared_content:
-            if isinstance(part, str): json_payload_content.append(part)
+            if isinstance(part, str):
+                json_payload_content.append(part)
             elif isinstance(part, dict) and 'data' in part and isinstance(part['data'], bytes):
+                # Кодируем байты изображения в base64 для JSON
                 base64_encoded_data = base64.b64encode(part['data']).decode('utf-8')
-                json_payload_content.append({"mime_type": part.get('mime_type', 'image/jpeg'), "data_base64": base64_encoded_data})
-            else: logger.warning(f"Пропуск некорректной части контента: {type(part)}")
-        if not json_payload_content: raise ValueError("Нет валидных частей контента")
-    except Exception as e: logger.error(f"Ошибка кодирования base64: {e}", exc_info=True); return None, f"Ошибка подготовки данных: {e}"
+                json_payload_content.append({
+                    "mime_type": part.get('mime_type', 'image/jpeg'),
+                    "data_base64": base64_encoded_data
+                })
+            else:
+                logger.warning(f"Пропуск некорректной части контента при подготовке JSON: {type(part)}")
+
+        if not json_payload_content:
+            raise ValueError("Нет валидных частей контента после форматирования для JSON.")
+
+    except Exception as e:
+        logger.error(f"Ошибка подготовки JSON payload: {e}", exc_info=True)
+        return None, f"Внутренняя ошибка: не удалось подготовить данные ({e.__class__.__name__})."
 
     payload = {"content": json_payload_content}
-    headers = {"Content-Type": "application/json", "X-Auth-Token": CLOUDFLARE_AUTH_TOKEN}
-    proxy_url = f"{CLOUDFLARE_WORKER_URL.rstrip('/')}/generate" # Убедимся, что URL корректный
 
-    logger.info(f"Отправка запроса к прокси: {proxy_url}")
-    # httpx сам выбросит исключение при ошибке, которое поймает @retry или внешний try/except
-    async with httpx.AsyncClient(timeout=90.0) as client: # Увеличим таймаут еще больше
-        response = await client.post(proxy_url, json=payload, headers=headers)
-        # Проверка статуса ПОСЛЕ попыток retry
-        response.raise_for_status()
-        proxy_response_data = response.json()
+    try:
+        proxy_response_data = await _call_proxy(payload)
 
-        if "response" in proxy_response_data:
-            logger.info("Успешный ответ получен от прокси.")
-            return proxy_response_data["response"], None # Нет примечаний от прокси пока
-        elif "error" in proxy_response_data:
-            logger.error(f"Прокси вернул ошибку: {proxy_response_data['error']}")
-            return None, f"Ошибка от прокси: {proxy_response_data['error']}"
+        if isinstance(proxy_response_data, dict):
+            if "response" in proxy_response_data:
+                # Успешный ответ от Gemini через прокси
+                return proxy_response_data["response"], None
+            elif "error" in proxy_response_data:
+                # Прокси вернул ошибку (возможно, от Gemini или свою)
+                error_message = proxy_response_data['error']
+                logger.error(f"Прокси вернул ошибку: {error_message}")
+                # Возвращаем ошибку как "примечание", чтобы она отобразилась пользователю
+                return None, f"Ошибка генерации: {error_message}"
+            else:
+                # Неожиданный формат ответа от прокси
+                logger.error(f"Неожиданный формат JSON ответа от прокси: {proxy_response_data}")
+                return None, "Ошибка связи с сервисом: неверный формат ответа."
         else:
-            logger.error(f"Неожиданный формат ответа от прокси: {proxy_response_data}")
-            return None, "Неверный формат ответа от прокси."
+             # Если _call_proxy вернул что-то совсем не то (маловероятно)
+             logger.error(f"Получен некорректный тип данных от _call_proxy: {type(proxy_response_data)}")
+             return None, "Внутренняя ошибка: некорректный ответ от прокси."
 
-# --- Обертка для обработки ошибок Retry ---
-async def safe_generate_story(prepared_content: Optional[PreparedContent]) -> Tuple[Optional[str], Optional[str]]:
-     """Безопасно вызывает generate_story_from_proxy и обрабатывает ошибки tenacity."""
-     try:
-         return await generate_story_from_proxy(prepared_content)
-     except Exception as e: # Ловим ошибки tenacity и другие непредвиденные
-          logger.error(f"Не удалось сгенерировать историю после нескольких попыток: {e}", exc_info=True)
-          error_msg = f"Ошибка связи с сервисом генерации ({e.__class__.__name__})."
-          # Можно добавить более специфичные сообщения для разных исключений
-          if isinstance(e, httpx.HTTPStatusError):
-               error_msg = f"Ошибка сервиса генерации ({e.response.status_code})."
-          elif isinstance(e, httpx.RequestError):
-               error_msg = f"Ошибка сети при связи с сервисом генерации."
-          return None, error_msg
+    except Exception as e: # Ловим ошибки tenacity (RetryError) и другие непредвиденные
+        logger.error(f"Не удалось вызвать прокси после нескольких попыток: {e}", exc_info=True)
+        error_msg = f"Ошибка сети или сервиса ({e.__class__.__name__}). Попробуйте позже."
+        # Можно добавить более специфичные сообщения для разных исключений
+        if isinstance(e, httpx.TimeoutException):
+             error_msg = "Сервис генерации не ответил вовремя. Попробуйте позже."
+        elif isinstance(e, httpx.HTTPStatusError):
+             error_msg = f"Сервис генерации вернул ошибку ({e.response.status_code})."
+        elif isinstance(e, httpx.RequestError):
+             error_msg = "Ошибка сети при подключении к сервису генерации."
+        elif isinstance(e, ValueError) and "Proxy URL or Auth Token" in str(e):
+             error_msg = "Критическая ошибка конфигурации бота." # Сообщение для пользователя
+             # Здесь также нужно уведомить владельца! (Будет сделано в вызывающем коде)
+        return None, error_msg
+
+# --- Обертки для конкретных задач ---
+
+async def safe_generate_story(
+    messages: List[Dict[str, Any]],
+    images_data: Dict[str, bytes],
+    genre_key: Optional[str] = 'default'
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Безопасно генерирует историю: готовит контент и вызывает прокси.
+    """
+    prepared_content = pb.build_story_content(messages, images_data, genre_key)
+    if not prepared_content:
+        # Если сам prompt_builder не смог ничего создать (например, пустые сообщения)
+        return "Нет данных для создания истории за этот период.", None
+    return await generate_via_proxy(prepared_content)
+
+
+async def safe_generate_summary(
+    messages: List[Dict[str, Any]]
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Безопасно генерирует саммари: готовит контент и вызывает прокси.
+    """
+    prepared_content = pb.build_summary_content(messages)
+    if not prepared_content:
+        return "Нет текстовых сообщений для создания выжимки.", None
+    return await generate_via_proxy(prepared_content)

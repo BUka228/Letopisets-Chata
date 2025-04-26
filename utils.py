@@ -1,10 +1,16 @@
 # utils.py
 import logging
 import asyncio
+import traceback
 from typing import Dict, List, Any, Optional
+
+# --- ИСПРАВЛЕНИЕ: Добавляем импорт Bot ---
+from telegram import Bot
+# -----------------------------------------
+
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError, NetworkError
-# Импорт для Retries из tenacity (если вы его используете)
+from telegram.constants import ParseMode
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type, before_sleep_log
 from config import BOT_OWNER_ID
 
@@ -14,36 +20,112 @@ retry_log = logging.getLogger(__name__ + '.retry') # Отдельный логг
 # --- Константа ---
 MAX_PHOTOS_TO_ANALYZE = 5
 
-async def notify_owner(context: ContextTypes.DEFAULT_TYPE, message: str):
-    """Отправляет сообщение владельцу бота."""
-    if not context.bot:
-        logger.error("Невозможно отправить уведомление владельцу: объект бота отсутствует.")
+# --- Улучшенная функция уведомления владельца ---
+async def notify_owner(
+    context: Optional[ContextTypes.DEFAULT_TYPE] = None,
+    bot: Optional[Bot] = None, # Теперь Bot импортирован и известен
+    message: str = "Произошло событие",
+    chat_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    operation: Optional[str] = None,
+    exception: Optional[BaseException] = None,
+    important: bool = False
+):
+    """Отправляет форматированное сообщение владельцу бота."""
+    if not BOT_OWNER_ID or BOT_OWNER_ID == 0:
+        if important:
+            logger.warning("BOT_OWNER_ID не настроен. Важное уведомление не отправлено: %s", message)
         return
-    # Проверяем, что BOT_OWNER_ID установлен и не равен 0
-    if BOT_OWNER_ID and BOT_OWNER_ID != 0:
-        try:
-            max_len = 4000
-            truncated_message = message[:max_len] + '...' if len(message) > max_len else message
-            await context.bot.send_message(
-                chat_id=BOT_OWNER_ID,
-                text=f"🚨 Уведомление от Летописца:\n\n{truncated_message}"
-            )
-            logger.info(f"Уведомление отправлено владельцу (ID: {BOT_OWNER_ID})")
-        except TelegramError as e:
-            # Логируем специфичные ошибки Telegram
-            logger.error(f"Не удалось отправить уведомление владельцу (ID: {BOT_OWNER_ID}): {e}")
-        except Exception as e:
-             # Логируем любые другие неожиданные ошибки
-             logger.error(f"Неожиданная ошибка при отправке уведомления владельцу: {e}", exc_info=True)
-    else:
-        # Логируем предупреждение, только если сообщение действительно важное (содержит ошибки)
-        if "ошибка" in message.lower() or "failed" in message.lower() or "error" in message.lower():
-            logger.warning("BOT_OWNER_ID не настроен в .env, важное уведомление не отправлено.")
 
-# --- Скачивание изображений с ретраями ---
+    target_bot = bot
+    if not target_bot and context and context.bot:
+        target_bot = context.bot
+    if not target_bot:
+         logger.error("Невозможно отправить уведомление владельцу: объект Bot не найден.")
+         return
+
+    try:
+        full_message = f"🔔 <b>Уведомление Летописца</b> 🔔\n\n"
+        if operation: full_message += f"<b>Операция:</b> {operation}\n"
+        if chat_id: full_message += f"<b>Чат:</b> <code>{chat_id}</code>\n"
+        if user_id: full_message += f"<b>Пользователь:</b> <code>{user_id}</code>\n"
+        full_message += f"\n{message}\n"
+
+        if exception:
+            full_message += f"\n<b>Тип ошибки:</b> {exception.__class__.__name__}\n"
+            try:
+                tb_lines = traceback.format_exception(type(exception), exception, exception.__traceback__, limit=5)
+                tb_str = "".join(tb_lines).replace('\n\n', '\n').strip()
+                # Экранируем HTML символы в traceback
+                escaped_tb_str = tb_str.replace('&', '&').replace('<', '<').replace('>', '>')
+                full_message += f"\n<pre><code class=\"language-python\">{escaped_tb_str[:1000]}{'...' if len(escaped_tb_str)>1000 else ''}</code></pre>"
+            except Exception as format_e:
+                logger.error(f"Ошибка форматирования traceback для notify_owner: {format_e}")
+                full_message += f"\n<i>(Не удалось отформатировать traceback)</i>"
+
+        max_len = 4096
+        if len(full_message) > max_len:
+            cutoff_msg = "\n\n[...] (сообщение было обрезано)"
+            full_message = full_message[:max_len - len(cutoff_msg)] + cutoff_msg
+
+        await target_bot.send_message(
+            chat_id=BOT_OWNER_ID,
+            text=full_message,
+            parse_mode=ParseMode.HTML
+        )
+        logger.info(f"Уведомление отправлено владельцу (ID: {BOT_OWNER_ID}). Операция: {operation or 'N/A'}")
+
+    except TelegramError as e:
+        logger.error(f"Не удалось отправить уведомление владельцу (ID: {BOT_OWNER_ID}): {e}")
+    except Exception as e:
+        logger.exception(f"Неожиданная ошибка при отправке уведомления владельцу:")
+
+
+# --- НОВАЯ: Вспомогательная функция для проверки прав администратора ---
+async def is_user_admin(
+    chat_id: int, user_id: int, context: Optional[ContextTypes.DEFAULT_TYPE] = None, bot: Optional[Bot] = None
+) -> bool:
+    """Проверяет, является ли пользователь администратором или создателем чата."""
+    if chat_id > 0: # В личных чатах пользователь всегда "админ"
+        return True
+
+    # Получаем объект бота
+    target_bot = bot
+    if not target_bot and context and context.bot:
+        target_bot = context.bot
+    if not target_bot:
+        logger.error(f"Bot object unavailable for admin check user {user_id} in chat {chat_id}")
+        # В случае отсутствия бота, безопаснее считать, что пользователь не админ
+        return False
+
+    try:
+        chat_member = await target_bot.get_chat_member(chat_id, user_id)
+        is_admin_status = chat_member.status in [
+            chat_member.status.ADMINISTRATOR,
+            chat_member.status.OWNER
+        ]
+        logger.debug(f"Admin check for user {user_id} in chat {chat_id}: status={chat_member.status}, is_admin={is_admin_status}")
+        return is_admin_status
+    except TelegramError as e:
+        # Логируем частые ошибки доступа чуть тише
+        error_msg = str(e).lower()
+        if "chat not found" in error_msg or "user not found" in error_msg or "peer_id_invalid" in error_msg:
+            logger.warning(f"Could not get member status user {user_id} in chat {chat_id}: {e}")
+        elif "not enough rights" in error_msg:
+             logger.warning(f"Bot doesn't have enough rights to get member status in chat {chat_id}: {e}")
+        else:
+            logger.error(f"Telegram error checking admin user {user_id} in chat {chat_id}: {e}")
+        # Если не можем проверить, считаем, что не админ
+        return False
+    except Exception as e:
+        logger.exception(f"Unexpected error checking admin user {user_id} in chat {chat_id}:")
+        return False
+
+# --- Функции скачивания изображений (download_single_image, download_images) ---
+#     Остаются без изменений в логике, но используют импортированный Bot
 @retry(
     stop=stop_after_attempt(3),
-    wait=wait_fixed(3), # Ждать 3 секунды между попытками
+    wait=wait_fixed(3),
     retry=retry_if_exception_type((TelegramError, NetworkError, TimeoutError)),
     before_sleep=before_sleep_log(retry_log, logging.WARNING)
 )
@@ -52,13 +134,14 @@ async def download_single_image(
 ) -> Optional[bytes]:
     """Скачивает одно изображение с повторными попытками."""
     log_prefix = f"[Chat {chat_id_for_log}]"
-    if context.bot is None:
+    # --- ИЗМЕНЕНО: Используем context.bot ---
+    if not context.bot:
         logger.error(f"{log_prefix} Bot object unavailable for download {file_id}")
         return None
+    # --------------------------------------
     try:
         logger.debug(f"{log_prefix} Attempting download file_id={file_id}...")
         file = await context.bot.get_file(file_id)
-        # Ограничим время на скачивание одного файла
         image_bytearray = await asyncio.wait_for(file.download_as_bytearray(), timeout=30.0)
 
         MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024 # 20 MB
@@ -82,7 +165,7 @@ async def download_images(
     context: ContextTypes.DEFAULT_TYPE,
     messages: List[Dict[str, Any]],
     chat_id: int,
-    max_photos: int # Принимаем лимит как аргумент
+    max_photos: int = MAX_PHOTOS_TO_ANALYZE # Используем значение по умолчанию
 ) -> Dict[str, bytes]:
     """Скачивает изображения, используя download_single_image с retries."""
     images_data: Dict[str, bytes] = {}
@@ -109,7 +192,7 @@ async def download_images(
         file_unique_id = msg.get('file_unique_id')
         file_id = msg.get('file_id')
         if file_unique_id and file_id and file_unique_id not in processed_unique_ids:
-            # Передаем chat_id в функцию скачивания для логов
+            # Передаем context в функцию скачивания
             tasks.append(asyncio.create_task(download_single_image(context, file_id, chat_id)))
             unique_ids_to_download.append(file_unique_id)
             processed_unique_ids.add(file_unique_id)
