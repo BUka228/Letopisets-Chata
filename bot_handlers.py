@@ -1090,33 +1090,41 @@ async def summary_period_button_handler(update: Update, context: ContextTypes.DE
         if summary_text:
             period_name = get_period_name(period_key, chat_lang)
             header = get_text("summarize_header", chat_lang, period_name=period_name)
-            final_message = header + summary_text
+            # --- ИЗМЕНЕНО: Используем Markdown для саммари ---
+            # Заголовок может содержать HTML, поэтому смешивать не очень хорошо.
+            # Давайте сделаем заголовок тоже Markdown-совместимым или отправим его отдельно.
+            # Вариант 1: Сделать заголовок Markdown
+            header_md = f"📝 *Краткая выжимка за период: {period_name}*\n" + "---" + "\n\n" # Пример Markdown заголовка
+            final_message_md = header_md + summary_text
+
             # Редактируем сообщение "Генерирую..." на финальное саммари
-            # (или отправляем новым, если редактирование невозможно)
             try:
-                await query.edit_message_text(final_message, parse_mode=ParseMode.HTML)
+                # Используем parse_mode=ParseMode.MARKDOWN
+                await query.edit_message_text(final_message_md, parse_mode=ParseMode.MARKDOWN)
             except (BadRequest, TelegramError) as edit_error:
                  logger.warning(f"Failed to edit message with summary result: {edit_error}. Sending as new message.")
                  # Отправляем как ответ на исходную команду /summarize (если возможно)
                  if query.message.reply_to_message:
-                     await query.message.reply_to_message.reply_html(final_message)
+                     # Используем reply_markdown
+                     await query.message.reply_to_message.reply_markdown(final_message_md)
                  else: # Или просто в чат
-                      await context.bot.send_message(chat.id, final_message, parse_mode=ParseMode.HTML)
+                      # Используем send_message с parse_mode=ParseMode.MARKDOWN
+                      await context.bot.send_message(chat.id, final_message_md, parse_mode=ParseMode.MARKDOWN)
+            # ---------------------------------------------------
             logger.info(f"Summary sent for period '{period_key}' in chat {chat.id}")
-            if error_msg: # Отправляем примечание, если оно было (маловероятно для саммари)
-                 try: await context.bot.send_message(chat.id, get_text("proxy_note", chat_lang, note=error_msg))
+            if error_msg: # Отправляем примечание (HTML здесь ОК)
+                 try: await context.bot.send_message(chat.id, get_text("proxy_note", chat_lang, note=error_msg), parse_mode=ParseMode.HTML)
                  except Exception: pass
         else:
-            # Ошибка генерации
+            # Ошибка генерации (здесь можно оставить HTML для сообщения об ошибке)
             logger.warning(f"Failed to generate summary for period '{period_key}' in chat {chat.id}. Reason: {error_msg}")
             final_error_text = get_text("summarize_failed", chat_lang, error=error_msg or 'Unknown')
-            # Уведомляем владельца о проблеме
             await notify_owner(
                 context=context, message=f"Ошибка генерации саммари ({period_key}): {error_msg}",
                 chat_id=chat.id, user_id=user.id, operation="generate_summary", important=True
             )
-            # Редактируем сообщение "Генерирую..." на сообщение об ошибке
             try:
+                # Сообщение об ошибке отправляем в HTML
                 await query.edit_message_text(final_error_text, parse_mode=ParseMode.HTML)
             except (BadRequest, TelegramError) as edit_error:
                  logger.warning(f"Failed to edit message with summary error: {edit_error}. Sending as new message.")
@@ -1129,8 +1137,7 @@ async def summary_period_button_handler(update: Update, context: ContextTypes.DE
     except Exception as e:
         logger.exception(f"Unexpected error processing summary result for chat {chat.id}: {e}")
         await notify_owner(context=context, message=f"Unexpected error processing summary result", chat_id=chat.id, user_id=user.id, operation="process_summary", exception=e, important=True)
-        # Попробуем сообщить пользователю
-        try: await context.bot.send_message(chat.id, get_text("error_db_generic", chat_lang)) # Общая ошибка
+        try: await context.bot.send_message(chat.id, get_text("error_db_generic", chat_lang))
         except Exception: pass
 
 # =============================================================================
