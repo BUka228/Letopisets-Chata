@@ -424,10 +424,27 @@ def get_chat_language(chat_id: int) -> str: # Без изменений логи
     try: from localization import get_chat_lang as get_cached_lang; return get_cached_lang(chat_id)
     except ImportError: settings = get_chat_settings(chat_id); return settings.get('lang', DEFAULT_LANGUAGE)
 
-def get_enabled_chats() -> List[int]: # Без изменений логики
-    chat_ids = []; sql = "SELECT chat_id FROM chat_settings WHERE enabled = 1"; 
-    try: rows = _execute_query(sql, fetch_all=True); chat_ids = [row['chat_id'] for row in rows] if rows else []; 
-    except Exception: logger.error("Failed get enabled chats."); logger.debug(f"Found {len(chat_ids)} enabled chats."); return chat_ids
+def get_enabled_chats() -> List[int]:
+    chat_ids = []
+    sql = "SELECT chat_id, enabled FROM chat_settings WHERE enabled = 1" # Выберем и enabled для лога
+    try:
+        logger.debug(f"Executing SQL for enabled chats: {sql}") # Лог перед запросом
+        rows = _execute_query(sql, fetch_all=True)
+        # --- ДОБАВЛЕНО ЛОГИРОВАНИЕ РЕЗУЛЬТАТА ---
+        if rows is None:
+            logger.warning("get_enabled_chats: _execute_query returned None")
+            rows = [] # Обрабатываем как пустой результат
+        logger.debug(f"get_enabled_chats: Query returned {len(rows)} rows.")
+        for i, row in enumerate(rows):
+            logger.debug(f"Row {i}: chat_id={row['chat_id']}, enabled={row['enabled']} (type: {type(row['enabled'])})")
+        # ----------------------------------------
+        chat_ids = [row['chat_id'] for row in rows] if rows else []
+    except Exception:
+        # Ошибка уже будет залогирована в _execute_query
+        logger.error(f"Exception in get_enabled_chats, returning empty list.") # Доп. лог
+        return [] # Важно возвращать пустой список при ошибке
+    logger.debug(f"get_enabled_chats returning: {chat_ids}")
+    return chat_ids
 
 def get_chat_timezone(chat_id: int) -> str: # Без изменений логики
     settings = get_chat_settings(chat_id); tz_str = settings.get('timezone', 'UTC'); 

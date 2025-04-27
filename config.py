@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from telegram.ext import filters
 from telegram.constants import ChatType
 import logging.handlers # <-- Добавляем для ротации логов
+from typing import Union
 
 load_dotenv()
 

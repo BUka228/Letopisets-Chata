@@ -20,6 +20,7 @@ from config import (
     SCHEDULE_HOUR, SCHEDULE_MINUTE, DEFAULT_LANGUAGE, COMMON_TIMEZONES,
     SUPPORTED_LANGUAGES, SUPPORTED_GENRES, SUPPORTED_PERSONALITIES,
     SUPPORTED_OUTPUT_FORMATS, BOT_OWNER_ID, DEFAULT_RETENTION_DAYS,  DEFAULT_OUTPUT_FORMAT, DEFAULT_PERSONALITY,
+    JOB_CHECK_INTERVAL_MINUTES,
     # Лимиты и дефолты для вмешательств
     INTERVENTION_MIN_COOLDOWN_MIN, INTERVENTION_MAX_COOLDOWN_MIN, INTERVENTION_DEFAULT_COOLDOWN_MIN,
     INTERVENTION_MIN_MIN_MSGS, INTERVENTION_MAX_MIN_MSGS, INTERVENTION_DEFAULT_MIN_MSGS,
@@ -285,20 +286,51 @@ async def regenerate_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except Exception: await update.message.reply_html(err_msg)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /status (только владелец)."""
     user = update.effective_user
     if not user or user.id != BOT_OWNER_ID: return
-    bd = context.application.bot_data; start_time=bd.get('bot_start_time',time.time())
-    last_job_dt=bd.get('last_daily_story_job_run_time'); last_job_e=bd.get('last_daily_story_job_error','Нет')
-    last_prg_dt=bd.get('last_purge_job_run_time'); last_prg_e=bd.get('last_purge_job_error','Нет')
-    up_str=str(datetime.timedelta(seconds=int(time.time()-start_time))); en_chats=dm.get_enabled_chats()
+
+    bd = context.application.bot_data
+    start_time = bd.get('bot_start_time', time.time())
+    # Получаем данные о задачах (могут быть None)
+    last_job_dt = bd.get('last_daily_story_job_run_time')
+    last_job_e = bd.get('last_daily_story_job_error')
+    last_prg_dt = bd.get('last_purge_job_run_time')
+    last_prg_e = bd.get('last_purge_job_error')
+
+    # Расчет uptime
+    uptime_str = str(datetime.timedelta(seconds=int(time.time() - start_time))) # <-- Правильное имя uptime_str
+    enabled_chats = dm.get_enabled_chats()
+
+    # Форматирование дат
     ljr_str = last_job_dt.strftime("%Y-%m-%d %H:%M:%S UTC") if last_job_dt else "Ни разу"
     lpr_str = last_prg_dt.strftime("%Y-%m-%d %H:%M:%S UTC") if last_prg_dt else "Ни разу"
-    # --- ИСПРАВЛЕНО ---
-    lje_safe = html.escape(last_job_e[:500]+('...'if len(last_job_e)>500 else'')); lpe_safe=html.escape(last_prg_e[:500]+('...'if len(last_prg_e)>500 else''))
-    # -------------------
-    from telegram import __version__ as ptb_version
-    txt=get_text("status_command_reply",DEFAULT_LANGUAGE, uptime=up_str,active_chats=len(en_chats),last_job_run=ljr_str,last_job_error=lje_safe,last_purge_run=lpr_str,last_purge_error=lpe_safe,ptb_version=ptb_version)
-    await update.message.reply_html(txt)
+
+    # Безопасное форматирование ошибок
+    lje_safe = "Нет"
+    if last_job_e and isinstance(last_job_e, str): lje_safe = html.escape(last_job_e[:500] + ('...' if len(last_job_e) > 500 else ''))
+    elif last_job_e: lje_safe = html.escape(str(last_job_e)[:500] + '...')
+
+    lpe_safe = "Нет"
+    if last_prg_e and isinstance(last_prg_e, str): lpe_safe = html.escape(last_prg_e[:500] + ('...' if len(last_prg_e) > 500 else ''))
+    elif last_prg_e: lpe_safe = html.escape(str(last_prg_e)[:500] + '...')
+
+    from telegram import __version__ as ptb_version # Получаем версию библиотеки
+
+    # --- ИСПРАВЛЕНО: Используем uptime=uptime_str ---
+    status_text = get_text(
+        "status_command_reply", DEFAULT_LANGUAGE,
+        uptime=uptime_str, # <-- ИЗМЕНЕНО ЗДЕСЬ
+        active_chats=len(enabled_chats),
+        last_job_run=ljr_str,
+        last_job_error=lje_safe,
+        last_purge_run=lpr_str,
+        last_purge_error=lpe_safe,
+        ptb_version=ptb_version
+    )
+    # -----------------------------------------------
+
+    await update.message.reply_html(status_text)
 
 async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /summarize - выбор периода."""
@@ -531,23 +563,6 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         await query.answer(get_text("error_db_generic", chat_lang), show_alert=True) # Общая ошибка
         await notify_owner(context=context, message="Critical error in settings_callback_handler", chat_id=chat_id, user_id=user_id, operation="settings_callback", exception=e, important=True)
 
-async def _handle_intervention_setting_update(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, setting_key: str, value: int):
-     """Внутр: Обновляет настройку вмешательства, проверяет лимиты, дает ОС."""
-     query = update.callback_query; chat_lang = await get_chat_lang(chat_id)
-     limits = { # Пределы из config.py
-         'intervention_cooldown_minutes': (INTERVENTION_MIN_COOLDOWN_MIN, INTERVENTION_MAX_COOLDOWN_MIN),
-         'intervention_min_msgs': (INTERVENTION_MIN_MIN_MSGS, INTERVENTION_MAX_MIN_MSGS),
-         'intervention_timespan_minutes': (INTERVENTION_MIN_TIMESPAN_MIN, INTERVENTION_MAX_TIMESPAN_MIN)
-     }
-     min_val, max_val = limits.get(setting_key, (0, 99999)) # Безопасный fallback
-     corrected_value = max(min_val, min(value, max_val))
-     success = dm.update_chat_setting(chat_id, setting_key, corrected_value)
-     if success:
-         await _display_settings_interventions(update, context, chat_id, user_id) # Перерисовываем меню
-         if value != corrected_value: await query.answer(get_text("error_value_corrected", chat_lang, min_val=min_val, max_val=max_val).format(value=corrected_value), show_alert=True)
-         else: await query.answer(get_text("settings_saved_popup", chat_lang))
-     else: await query.answer(get_text("error_db_generic", chat_lang), show_alert=True)
-
 
 async def feedback_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик кнопок фидбэка (^feedback_)."""
@@ -759,108 +774,97 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def _handle_time_input(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, pending_msg_id: int, user_message: Message):
     """
-    Внутр: Обрабатывает текстовое сообщение, когда ожидается ввод времени.
-    Вызывается из handle_message.
+    Внутр: Обрабатывает ввод времени, ОКРУГЛЯЕТ и сохраняет.
+    (Основано на вашей версии + добавлено округление)
     """
     logger.debug(f"Handle time input u={user_id} c={chat_id} for msg_id={pending_msg_id}")
-    context.user_data.pop(PENDING_TIME_INPUT_KEY, None) # Clear pending flag immediately
+    context.user_data.pop(PENDING_TIME_INPUT_KEY, None) # Снимаем флаг ожидания
 
     chat_lang, _ = await get_chat_info(chat_id, context)
     chat_tz_str = dm.get_chat_timezone(chat_id)
     input_time_str = user_message.text.strip()
-
-    # Кнопка Назад для включения в сообщения об ошибках/успехе
     back_button_kbd = InlineKeyboardMarkup([[InlineKeyboardButton(get_text("button_back", chat_lang), callback_data="settings_main")]])
 
-    # Validation
-    if not re.fullmatch(r"^(?:[01]\d|2[0-3]):[0-5]\d$", input_time_str):
+    # 1. Валидация формата
+    match = re.fullmatch(r"^(?P<hour>[01]\d|2[0-3]):(?P<minute>[0-5]\d)$", input_time_str)
+    if not match:
         error_text = get_text("settings_time_invalid_format", chat_lang)
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=pending_msg_id,
-                text=error_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=back_button_kbd # Позволяем вернуться назад
-            )
-        except (BadRequest, TelegramError) as e:
-            logger.error(f"Error editing message for invalid time format c={chat_id}: {e}")
-            # Если не удалось отредактировать, может, исходное сообщение удалено.
-            # Отправим новым сообщением как fallback
-            try: await update.effective_message.reply_html(error_text, reply_markup=back_button_kbd)
-            except Exception as send_e: logger.error(f"Failed fallback send invalid format msg: {send_e}")
+        try: await context.bot.edit_message_text(chat_id, pending_msg_id, error_text, ParseMode.HTML, reply_markup=back_button_kbd);
+        except (BadRequest, TelegramError) as e: logger.warning(f"Failed edit msg invalid format: {e}")
+        try: await user_message.delete()
+        except Exception: pass
+        return
 
-        try: await user_message.delete() # Удаляем некорректный ввод пользователя
-        except Exception as del_e: logger.warning(f"Failed to delete user invalid time input: {del_e}")
-        return # Прерываем обработку
+    hour_local = int(match.group("hour"))
+    minute_local = int(match.group("minute"))
 
-    # Conversion & Saving
-    utc_time_save = None
-    local_time_saved = input_time_str
-    tz_short = '??'
+    # --- ДОБАВЛЕНО: Логика Округления ---
+    rounded_minute = minute_local
+    rounded_time_str = input_time_str # Время для отображения пользователю (округленное)
+    interval = JOB_CHECK_INTERVAL_MINUTES
+    if minute_local % interval != 0:
+        rounded_minute = (minute_local // interval) * interval
+        rounded_time_str = f"{hour_local:02d}:{rounded_minute:02d}"
+        logger.info(f"Input time {input_time_str} rounded down to {rounded_time_str} c={chat_id} (int {interval})")
+    # --- КОНЕЦ Добавленной Логики Округления ---
+
+    # 3. Конвертация (Округленного) времени в UTC
+    utc_time_save = None; tz_short = '??'
     try:
-        hour_local, minute_local = map(int, input_time_str.split(':'))
-        local_tz = pytz.timezone(chat_tz_str)
-        # Берем текущую дату для правильного учета летнего времени
-        now_local_naive = datetime.datetime.now(local_tz).replace(tzinfo=None)
-        time_local_naive = now_local_naive.replace(hour=hour_local,minute=minute_local,second=0,microsecond=0)
-        time_local_aware = local_tz.localize(time_local_naive, is_dst=None) # Автоопределение DST
-        time_utc = time_local_aware.astimezone(pytz.utc)
-        utc_time_save = time_utc.strftime("%H:%M")
-        tz_short = time_local_aware.strftime('%Z') # Краткое имя зоны с учетом DST
-        logger.info(f"Chat={chat_id} TimeInput='{input_time_str}' TZ={chat_tz_str} -> UTC={utc_time_save}")
+        local_tz = pytz.timezone(chat_tz_str); now_naive = datetime.datetime.now(local_tz).replace(tzinfo=None)
+        # --- ИСПОЛЬЗУЕТСЯ rounded_minute ---
+        time_naive = now_naive.replace(hour=hour_local, minute=rounded_minute, second=0, microsecond=0)
+        # ----------------------------------
+        time_aware = local_tz.localize(time_naive, is_dst=None); t_utc=time_aware.astimezone(pytz.utc)
+        utc_time_save=t_utc.strftime("%H:%M"); tz_short=time_aware.strftime('%Z')
+        logger.info(f"C={chat_id} Input='{input_time_str}' Rounded='{rounded_time_str}' TZ={chat_tz_str}->UTC={utc_time_save}")
     except Exception as e:
-        logger.error(f"Error convert time c={chat_id} inp='{input_time_str}' tz='{chat_tz_str}': {e}", exc_info=True)
-        error_text = get_text("error_db_generic", chat_lang) # Общая ошибка
-        try:
-            # Пытаемся отредактировать исходное сообщение об ошибке
-            await context.bot.edit_message_text(
-                chat_id=chat_id, message_id=pending_msg_id, text=error_text, reply_markup=back_button_kbd
-            )
-        except (BadRequest, TelegramError) as edit_e:
-             logger.error(f"Error editing message on time conversion error c={chat_id}: {edit_e}")
-             # Fallback - отправить новым
-             try: await update.effective_message.reply_text(error_text, reply_markup=back_button_kbd)
-             except Exception as send_e: logger.error(f"Failed fallback send time conversion err: {send_e}")
-        try: await user_message.delete() # Удаляем некорректное сообщение
-        except Exception as del_e: logger.warning(f"Failed delete user message on time conv err: {del_e}")
-        return # Прерываем
+         logger.error(f"Err conv time c={chat_id} rounded_t='{rounded_time_str}': {e}", exc_info=True)
+         err_txt = get_text("error_db_generic", chat_lang)
+         try: await context.bot.edit_message_text(chat_id,pending_msg_id,err_txt,reply_markup=back_button_kbd); await user_message.delete();
+         except Exception: pass
+         return
 
-    # Save to DB
+    # 4. Сохранение UTC времени в БД
     success = dm.update_chat_setting(chat_id, 'custom_schedule_time', utc_time_save)
+
+    # 5. Формирование ответного сообщения
     if success:
+        # --- Используем округленное время для сообщения ---
         success_text = get_text(
             "settings_time_success", chat_lang,
-            local_time=local_time_saved, tz_short=tz_short, utc_time=utc_time_save
+            local_time=rounded_time_str, # <-- Показываем округленное
+            tz_short=tz_short,
+            utc_time=utc_time_save
         )
-        try:
-             # Обновляем исходное сообщение об успехе и добавляем кнопку Назад
-             await context.bot.edit_message_text(
-                 chat_id=chat_id, message_id=pending_msg_id, text=success_text,
-                 parse_mode=ParseMode.HTML, reply_markup=back_button_kbd
-            )
-        except (BadRequest, TelegramError) as e:
-             logger.error(f"Error updating settings message after time set success c={chat_id}: {e}")
-             # Fallback - просто отправить сообщение об успехе
-             try: await update.effective_message.reply_html(success_text, reply_markup=back_button_kbd)
-             except Exception as send_e: logger.error(f"Failed fallback send time set success: {send_e}")
+        # -----------------------------------------------
+    else: # Ошибка сохранения БД
+         success_text = get_text("error_db_generic", chat_lang)
 
-    else: # DB save error
-        error_text = get_text("error_db_generic", chat_lang)
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id, message_id=pending_msg_id, text=error_text, reply_markup=back_button_kbd
-            )
-        except (BadRequest, TelegramError) as edit_e:
-             logger.error(f"Error editing msg on DB save error c={chat_id}: {edit_e}")
-             # Fallback
-             try: await update.effective_message.reply_text(error_text, reply_markup=back_button_kbd)
-             except Exception as send_e: logger.error(f"Failed fallback send db err msg: {send_e}")
+    # 6. Обновление сообщения настроек (с улучшенной обработкой ошибок)
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=pending_msg_id, text=success_text,
+            parse_mode=ParseMode.HTML, reply_markup=back_button_kbd
+        )
+    except (BadRequest, TelegramError) as e:
+        error_text_lower = str(e).lower()
+        if "message is not modified" in error_text_lower:
+            logger.debug(f"Time setting message {pending_msg_id} not modified.")
+        elif "chat not found" in error_text_lower or "message to edit not found" in error_text_lower:
+            logger.warning(f"Orig settings msg {pending_msg_id} not found c={chat_id}. Sending new confirmation.")
+            try: await update.effective_message.reply_html(success_text, reply_markup=back_button_kbd)
+            except Exception as send_e: logger.error(f"Failed to send fallback time set confirmation: {send_e}")
+        else:
+            logger.error(f"Failed to edit settings msg {pending_msg_id} c={chat_id}: {e}")
+            # Опционально: Fallback на отправку нового сообщения при других ошибках
+            # try: await update.effective_message.reply_html(success_text, reply_markup=back_button_kbd); logger.info(f"Sent new confirmation for msg {pending_msg_id} due to edit error: {e.__class__.__name__}")
+            # except Exception as send_e: logger.error(f"Failed to send fallback confirmation after edit error: {send_e}")
 
-    # Удаляем сообщение пользователя с введенным временем в любом случае (успех или ошибка БД)
+    # Удаляем сообщение пользователя в любом случае
     try: await user_message.delete()
-    except Exception as del_e: logger.warning(f"Failed delete user time input message post-process: {del_e}")
-
+    except (BadRequest, TelegramError) as e: logger.warning(f"Failed del user time input msg post-process: {e}")
+    except Exception as e: logger.error(f"Unexp err del user time input msg: {e}")
 
 async def _check_and_trigger_intervention(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
      """Внутр: Проверяет условия и запускает фоновую задачу вмешательства."""

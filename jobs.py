@@ -8,6 +8,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, Application
 from telegram.error import TelegramError, NetworkError, BadRequest
 from typing import Dict, List, Any, Optional, Tuple
+import html
 
 # Импорты проекта
 import data_manager as dm
