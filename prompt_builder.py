@@ -9,7 +9,7 @@ from typing import List, Dict, Union, Optional, Any
 # Импортируем необходимые константы и словари из конфига
 from config import (
     SUPPORTED_GENRES, SUPPORTED_PERSONALITIES, DEFAULT_PERSONALITY,
-    DEFAULT_OUTPUT_FORMAT, SUPPORTED_OUTPUT_FORMATS
+    DEFAULT_OUTPUT_FORMAT, INTERVENTION_CONTEXT_HOURS
 )
 
 logger = logging.getLogger(__name__)
@@ -287,30 +287,70 @@ def build_summary_content(messages: List[Dict[str, Any]]) -> Optional[PreparedCo
 # Сборка Контента для Вмешательств
 # ================================================
 def build_intervention_prompt(
-    recent_messages_texts: List[str],
+    messages_texts_in_context_window: List[str], # Принимаем правильный список строк
     personality_key: str = DEFAULT_PERSONALITY
 ) -> Optional[str]:
-    """Генерирует промпт для короткого комментария-вмешательства."""
-    if not recent_messages_texts: return None
+    """
+    Генерирует промпт для комментария-вмешательства, используя
+    контекст за последние N часов, но фокусируясь на недавних сообщениях.
+    """
+    logger.debug(f"Building intervention prompt. Received {len(messages_texts_in_context_window)} texts.")
 
+    if not messages_texts_in_context_window:
+        logger.debug("build_intervention_prompt received empty list, returning None.")
+        return None
+
+    # Определяем инструкцию по личности
     personality_instruction = ""
-    if personality_key == 'wise': personality_instruction = "Ты Мудрый Старец."
-    elif personality_key == 'sarcastic': personality_instruction = "Ты Саркастичный Наблюдатель." # Правила безопасности для сарказма в другом месте не нужны, т.к. коммент короткий и не отвечает
-    elif personality_key == 'poet': personality_instruction = "Ты Поэт-Романтик."
-    else: personality_instruction = "Ты Нейтральный Наблюдатель." # Важно: "Наблюдатель"
+    if personality_key == 'wise':
+        personality_instruction = "Ты Мудрый Старец, наблюдающий за беседой."
+    elif personality_key == 'sarcastic':
+        personality_instruction = "Ты Саркастичный Наблюдатель с тонким чувством иронии."
+    elif personality_key == 'poet':
+        personality_instruction = "Ты Поэт-Романтик, видящий красоту и метафоры в общении."
+    else: # neutral
+        personality_instruction = "Ты Нейтральный Наблюдатель, следящий за ходом дискуссии."
 
-    log_preview = "\n".join([f"- «{text[:80].strip()}{'…' if len(text)>80 else ''}»" for text in recent_messages_texts])
+    # --- Формируем строку контекста ---
+    context_log_str = ""
+    try:
+        # Используем простой цикл для надежности
+        temp_list = []
+        for text in messages_texts_in_context_window:
+            temp_list.append(f"- {text.strip()}") # Добавляем в список с префиксом
+        context_log_str = "\n".join(temp_list) # Объединяем строки с переносами
 
+        # Логгируем результат (можно оставить DEBUG или убрать)
+        logger.debug(f"build_intervention_prompt: Final context_log_str: '{context_log_str[:100]}...'")
+
+    except Exception as e:
+        logger.error(f"Error building context log string: {e}", exc_info=True)
+        return None # Ошибка при форматировании
+
+    # Проверяем на всякий случай, что строка не пустая, если были входные данные
+    if not context_log_str and messages_texts_in_context_window:
+        logger.error("context_log_str is empty after formatting loop despite non-empty input.")
+        return None
+
+    # --- СОБИРАЕМ ФИНАЛЬНЫЙ ПРОМПТ ---
     prompt = (
-        f"{personality_instruction} "
-        f"Ниже последние сообщения чата:\n{log_preview}\n\n"
-        f"Твоя задача: Напиши **ОДНУ ОЧЕНЬ КОРОТКУЮ (макс. 10-15 слов)** фразу-наблюдение в твоем стиле, **вдохновленную** этими сообщениями. "
-        f"**ЗАПРЕЩЕНО**: Отвечать кому-либо, задавать вопросы, напрямую комментировать последнее сообщение, пытаться продолжить диалог, использовать Markdown."
-        f"Твоя фраза должна быть **отстраненной заметкой на полях**, мыслью вслух."
-        f"Пример (Мудрый): 'Время утекает, а слова остаются...'."
-        f"Пример (Саркастичный): 'Кажется, обсуждение достигло пика продуктивности.'."
-        f"Пример (Поэт): 'Словно листья на ветру, мысли кружат в этом чате...'."
-        f"Пример (Нейтральный): 'Обсуждение продолжается.'."
-        f"\nТвоя фраза-наблюдение:" # Оставляем для AI чтобы он написал только саму фразу
+    f"{personality_instruction}\n\n"
+    f"Проанализируй текстовые сообщения из группового чата за последние ~{INTERVENTION_CONTEXT_HOURS} часов, представленные ниже. "
+    f"Они показывают общий контекст разговора.\n\n"
+    f"КОНТЕКСТ ЧАТА ({INTERVENTION_CONTEXT_HOURS}ч):\n"
+    f"---------------------------------\n"
+    f"{context_log_str}\n"
+    f"---------------------------------\n\n"
+    f"**Твоя задача:** Сосредоточься на **САМЫХ ПОСЛЕДНИХ СООБЩЕНИЯХ** в этом контексте. "
+    f"Напиши **уместный и естественный комментарий** (несколько предложений в зависимости от обсуждений), который бы органично вписался в **текущий** ход беседы, как будто ты участник чата. "
+    f"Твой ответ должен отражать твою личность.\n\n"
+    f"**ПРАВИЛА:**\n"
+    f"1.  Комментарий не должен быть громоздким.\n"
+    f"2.  Реагируй на **недавнюю** тему или событие.\n"
+    f"3.  Можешь выразить мнение, задать вопрос или просто отреагировать **в соответствии со своей личностью**.\n"
+    f"4.  **БЕЗ MARKDOWN** или форматирования.\n"
+    f"5.  **НЕ повторяй** фразы из сообщений дословно.\n\n"
+    f"Напиши свой комментарий:"
     )
+
     return prompt

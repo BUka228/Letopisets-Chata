@@ -270,23 +270,22 @@ async def safe_generate_summary(
 
 
 async def safe_generate_intervention(
-    recent_messages_texts: List[str],
-    personality_key: str,
-    lang: str = DEFAULT_LANGUAGE # Язык пока не используется в промпте вмешательства, но может пригодиться
+    # ИЗМЕНЕНО: Принимаем готовую строку промпта
+    intervention_prompt_string: Optional[str],
+    lang: str = DEFAULT_LANGUAGE # Оставляем lang на всякий случай
 ) -> Optional[str]:
     """
-    Генерирует короткий комментарий для вмешательства.
+    Генерирует короткий комментарий для вмешательства ИЗ ГОТОВОГО ПРОМПТА.
     Использует урезанные настройки retry/timeout.
     В случае ошибки возвращает None и логирует ее (НЕ user-friendly ошибку).
     """
-    if not recent_messages_texts: return None
-    logger.debug(f"Generating intervention: personality={personality_key}, lang={lang}")
-    intervention_prompt = pb.build_intervention_prompt(personality_key, recent_messages_texts)
-    if not intervention_prompt:
-        logger.debug("Intervention prompt builder returned empty.")
+
+    if not intervention_prompt_string:
+        logger.debug("safe_generate_intervention received empty prompt string.")
         return None
 
-    payload = {"content": [intervention_prompt]} # Простой текстовый payload
+    # Используем переданный промпт
+    payload = {"content": [intervention_prompt_string]}
 
     try:
         # Вызываем прокси со специальными настройками retry/timeout
@@ -296,7 +295,7 @@ async def safe_generate_intervention(
             timeout=INTERVENTION_TIMEOUT_SEC # <<-- Важно!
         )
 
-        # Нам нужен только текст или None в случае любой проблемы
+        # Остальная логика обработки ответа остается без изменений...
         if isinstance(response_data, dict) and "response" in response_data:
              result_text = response_data["response"].strip()
              if result_text:

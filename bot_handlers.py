@@ -11,6 +11,7 @@ import time
 import re
 import pytz
 import html
+import prompt_builder as pb
 from typing import Optional, Dict, Any, Tuple, List
 
 # Импорты проекта
@@ -25,7 +26,7 @@ from config import (
     INTERVENTION_MIN_COOLDOWN_MIN, INTERVENTION_MAX_COOLDOWN_MIN, INTERVENTION_DEFAULT_COOLDOWN_MIN,
     INTERVENTION_MIN_MIN_MSGS, INTERVENTION_MAX_MIN_MSGS, INTERVENTION_DEFAULT_MIN_MSGS,
     INTERVENTION_MIN_TIMESPAN_MIN, INTERVENTION_MAX_TIMESPAN_MIN, INTERVENTION_DEFAULT_TIMESPAN_MIN,
-    INTERVENTION_PROMPT_MESSAGE_COUNT
+     INTERVENTION_CONTEXT_HOURS
 )
 from localization import (
     get_text, get_chat_lang, update_chat_lang_cache, get_genre_name,
@@ -885,29 +886,137 @@ async def _check_and_trigger_intervention(chat_id: int, context: ContextTypes.DE
 
 
 async def _try_send_intervention(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Внутр: ФОНОВАЯ ЗАДАЧА - генерирует и отправляет комментарий."""
-    if not context.bot: return
+    """
+    Внутренняя ФОНОВАЯ ЗАДАЧА: Генерирует и пытается отправить
+    комментарий-вмешательство в чат, используя контекст за последние N часов.
+    (Версия с максимальным логированием для поиска проблемы с context_texts)
+    """
+    if not context.bot:
+        logger.error(f"Intervention task c={chat_id}: Bot object not found in context.")
+        return
+
+    log_prefix = f"Intervention task c={chat_id}:" # Префикс для логов этой задачи
+
     try:
+        # 1. Получаем настройки
         settings = dm.get_chat_settings(chat_id)
-        if not settings.get('allow_interventions'): return # Re-check
-        personality = settings.get('story_personality', DEFAULT_PERSONALITY); lang = settings.get('lang', DEFAULT_LANGUAGE)
-        recent_msgs = dm.get_messages_for_chat_last_n(chat_id, limit=INTERVENTION_PROMPT_MESSAGE_COUNT, only_text=True)
-        if len(recent_msgs) < 2: logger.debug(f"Interv c={chat_id}: Not enough text msgs ({len(recent_msgs)})"); return
+        if not settings.get('allow_interventions', False):
+            logger.debug(f"{log_prefix} Interventions disabled during processing.")
+            return
 
-        recent_texts = [m.get('content', '') for m in recent_msgs if m.get('content')];
-        if not recent_texts: return
+        personality = settings.get('story_personality', DEFAULT_PERSONALITY)
+        lang = settings.get('lang', DEFAULT_LANGUAGE) # Язык пока не сильно используется в промпте, но передаем
 
-        intervention_text = await gc.safe_generate_intervention(recent_texts, personality, lang)
+        # 2. Получаем сообщения из БД
+        all_messages_since = [] # Инициализируем
+        try:
+            since_dt = datetime.datetime.now(pytz.utc) - datetime.timedelta(hours=INTERVENTION_CONTEXT_HOURS)
+            all_messages_since = dm.get_messages_for_chat_since(chat_id, since_dt)
+            # Логгируем количество полученных записей *из БД*
+            logger.debug(f"{log_prefix} Fetched {len(all_messages_since)} records from DB since {since_dt.isoformat()}")
+            # --- ДОПОЛНИТЕЛЬНЫЙ ЛОГ: Первые 5 записей из БД ---
+            if all_messages_since:
+                 logger.debug(f"{log_prefix} First 5 records raw from DB: {all_messages_since[:5]}")
+            # -----------------------------------------------
+        except Exception as db_err:
+            logger.error(f"{log_prefix} Failed to fetch messages: {db_err}", exc_info=True)
+            return
+
+        # 3. Фильтрация и извлечение ТЕКСТА
+        context_texts = [] # Инициализируем
+        if all_messages_since:
+            logger.debug(f"{log_prefix} Starting filtering of {len(all_messages_since)} records...")
+            try:
+                # ----------- НАЧАЛО ФИЛЬТРАЦИИ -----------
+                context_texts_intermediate = []
+                for i, m in enumerate(all_messages_since):
+                     # Логируем КАЖДОЕ сообщение перед фильтрацией
+                     logger.debug(f"{log_prefix} Record {i}: {m}")
+                     if isinstance(m, dict) and m.get('type') == 'text' and m.get('content'):
+                         content_value = m.get('content', '')
+                         logger.debug(f"{log_prefix} Record {i} PASSED filter. Content: '{content_value}'")
+                         context_texts_intermediate.append(str(content_value)) # Добавляем во временный список
+                     else:
+                         logger.debug(f"{log_prefix} Record {i} FAILED filter (type={m.get('type')}, has_content={bool(m.get('content'))})")
+                context_texts = context_texts_intermediate # Присваиваем результат основному списку
+                # ----------- КОНЕЦ ФИЛЬТРАЦИИ -----------
+                logger.info(f"{log_prefix} Filtered {len(context_texts)} non-empty text messages.")
+            except Exception as filter_err:
+                logger.error(f"{log_prefix} Error during message filtering loop: {filter_err}", exc_info=True)
+                # Решаем, продолжать ли с пустым списком или выйти
+                # В данном случае, если ошибка фильтрации, лучше выйти
+                return
+
+        # ====================================================================
+        # !!! КРИТИЧЕСКИ ВАЖНЫЙ ЛОГ !!! (Уровень WARNING для видимости)
+        # Выводим содержимое списка context_texts СРАЗУ ПОСЛЕ его формирования
+        # ====================================================================
+        logger.warning(f"{log_prefix} -----> ACTUAL context_texts LIST BEFORE PROMPT BUILD: {context_texts}")
+
+        # 4. Проверяем список на пустоту
+        if not context_texts:
+            logger.debug(f"{log_prefix} context_texts list is empty, skipping prompt generation.")
+            return
+
+        # 5. Построение промпта
+        intervention_prompt_string = None # Инициализируем
+        try:
+            # Передаем ТОЧНО тот список, что залогировали выше
+            intervention_prompt_string = pb.build_intervention_prompt(context_texts, personality)
+            if intervention_prompt_string:
+                 logger.debug(f"{log_prefix} Prompt string built successfully (length: {len(intervention_prompt_string)}).")
+            else:
+                 # Эта ветка должна сработать, если build_intervention_prompt вернул None
+                 logger.warning(f"{log_prefix} Prompt builder returned None or empty string despite non-empty context_texts.")
+                 return # Выходим, если промпт не удалось построить
+
+        except Exception as build_err:
+            logger.error(f"{log_prefix} Error building intervention prompt: {build_err}", exc_info=True)
+            return
+
+        # Проверка на всякий случай, если build_intervention_prompt вернул пустую строку
+        if not intervention_prompt_string:
+             logger.error(f"{log_prefix} Intervention prompt is unexpectedly empty after build attempt.")
+             return
+
+        # ЛОГ 3: Логгируем начало промпта для сверки (это уже было в gemini_client, но можно и здесь для полноты)
+        logger.debug(f"{log_prefix} Generated prompt (first 300 chars): {intervention_prompt_string[:300]}...")
+
+        # 6. Вызов Gemini
+        intervention_text = await gc.safe_generate_intervention(intervention_prompt_string, lang)
+
+        # 7. Обработка ответа и отправка
         if intervention_text:
-             inter_settings_recheck = dm.get_intervention_settings(chat_id) # Re-check cooldown
-             now_ts=int(time.time()); last_ts=inter_settings_recheck.get('last_intervention_ts',0); cd_sec=inter_settings_recheck.get('cooldown_minutes')*60
-             if now_ts >= last_ts + cd_sec:
-                 logger.info(f"Interv c={chat_id}: Sending '{intervention_text[:50]}...' (Pers: {personality})")
-                 await context.bot.send_message(chat_id=chat_id, text=intervention_text) # Send plain text
-                 dm.update_chat_setting(chat_id, 'last_intervention_ts', now_ts) # Update timestamp ONLY on success
-             else: logger.info(f"Interv c={chat_id}: Cooldown activated during generation, skipped.")
-        else: logger.debug(f"Interv c={chat_id}: AI no comment pers={personality}.")
-    except Exception as e: logger.error(f"Error in intervention task c={chat_id}: {e}", exc_info=True) # Log error but don't crash
+            # Повторная проверка кулдауна перед отправкой
+            inter_settings_recheck = dm.get_intervention_settings(chat_id)
+            now_ts = int(time.time())
+            last_ts = inter_settings_recheck.get('last_intervention_ts', 0)
+            # Используем get() для безопасного получения значения (оно должно быть из get_intervention_settings, но на всякий случай)
+            cd_minutes = inter_settings_recheck.get('cooldown_minutes', INTERVENTION_DEFAULT_COOLDOWN_MIN)
+            cd_sec = cd_minutes * 60
+
+            if now_ts >= last_ts + cd_sec:
+                logger.info(f"{log_prefix} Sending '{intervention_text[:50]}...' (Personality: {personality})")
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=intervention_text)
+                    # Обновляем метку ТОЛЬКО после успешной отправки
+                    dm.update_chat_setting(chat_id, 'last_intervention_ts', now_ts)
+                    logger.info(f"{log_prefix} Timestamp updated to {now_ts}")
+                except TelegramError as send_err:
+                     logger.error(f"{log_prefix} Failed to send intervention message: {send_err}")
+                     # Не обновляем timestamp, если отправка не удалась
+                except Exception as send_generic_err:
+                     logger.error(f"{log_prefix} Unexpected error sending intervention message: {send_generic_err}", exc_info=True)
+                     # Не обновляем timestamp
+            else:
+                logger.info(f"{log_prefix} Cooldown activated during generation ({now_ts} < {last_ts + cd_sec}), skipped sending.")
+        else:
+            # safe_generate_intervention уже залогировал причину (ошибку или пустой ответ ИИ)
+            logger.debug(f"{log_prefix} No intervention text generated by AI.")
+
+    except Exception as e:
+        # Ловим любые другие ошибки на верхнем уровне задачи
+        logger.error(f"CRITICAL Error in intervention task main try block for chat c={chat_id}: {e}", exc_info=True)
 
 
 # ==================
@@ -920,35 +1029,69 @@ async def _display_settings_main(update: Update, context: ContextTypes.DEFAULT_T
     chat_lang, chat_title_safe = await get_chat_info(chat_id, context)
     settings = dm.get_chat_settings(chat_id)
 
-    # Получение и форматирование всех текущих значений для отображения
-    status_text = get_text("enabled_status" if settings.get('enabled', True) else "disabled_status", chat_lang)
-    lang_name = LOCALIZED_TEXTS.get(settings.get('lang', DEFAULT_LANGUAGE), {}).get("lang_name", settings.get('lang', DEFAULT_LANGUAGE))
-    chat_tz_str = settings.get('timezone', 'UTC')
+    # --- БОЛЕЕ БЕЗОПАСНОЕ ПОЛУЧЕНИЕ ЧАСОВОГО ПОЯСА ---
+    # 1. Получаем строку таймзоны из настроек
+    chat_tz_str = settings.get('timezone')
+    # 2. Если она None или пустая, используем 'UTC' как дефолт
+    if not chat_tz_str:
+        logger.warning(f"Chat {chat_id} has missing timezone in settings, defaulting to UTC.")
+        chat_tz_str = 'UTC'
+        # Опционально: можно попытаться исправить это в БД для будущих вызовов
+        # try:
+        #     dm.update_chat_setting(chat_id, 'timezone', 'UTC')
+        # except Exception as db_fix_e:
+        #     logger.error(f"Failed to fix missing timezone in DB for chat {chat_id}: {db_fix_e}")
+
+    # 3. Получаем отображаемое имя, используя гарантированно не-None chat_tz_str
+    #    Если chat_tz_str нет в словаре COMMON_TIMEZONES, просто покажем саму строку (например, 'Asia/Yakutsk')
     tz_display_name = COMMON_TIMEZONES.get(chat_tz_str, chat_tz_str)
-    genre_display_name = get_genre_name(settings.get('story_genre', 'default'), chat_lang)
-    personality_display_name = get_personality_name(settings.get('story_personality', DEFAULT_PERSONALITY), chat_lang)
-    output_format_display_name = get_output_format_name(settings.get('output_format', DEFAULT_OUTPUT_FORMAT), chat_lang)
-    retention_display = format_retention_days(settings.get('retention_days'), chat_lang) # Получаем строку 'N дн.' или 'Бессрочно'
-    interventions_allowed = settings.get('allow_interventions', False) # Получаем булево значение
-    intervention_status_text = get_text("settings_interventions_enabled" if interventions_allowed else "settings_interventions_disabled", chat_lang) # Получаем локализованный текст статуса
+    # --- КОНЕЦ БЕЗОПАСНОГО ПОЛУЧЕНИЯ ЧАСОВОГО ПОЯСА ---
 
-    # Форматирование времени генерации
+    # Получение и форматирование остальных текущих значений для отображения
+    status_text = get_text("enabled_status" if settings.get('enabled', True) else "disabled_status", chat_lang)
+    # --- Язык ---
+    lang_code = settings.get('lang', DEFAULT_LANGUAGE)
+    lang_name = LOCALIZED_TEXTS.get(lang_code, {}).get("lang_name", lang_code) # Безопасное получение имени языка
+    # --- Жанр ---
+    genre_key = settings.get('story_genre', 'default')
+    genre_display_name = get_genre_name(genre_key, chat_lang)
+    # --- Личность ---
+    personality_key = settings.get('story_personality', DEFAULT_PERSONALITY)
+    personality_display_name = get_personality_name(personality_key, chat_lang)
+    # --- Формат ---
+    output_format_key = settings.get('output_format', DEFAULT_OUTPUT_FORMAT)
+    output_format_display_name = get_output_format_name(output_format_key, chat_lang)
+    # --- Хранение ---
+    retention_display = format_retention_days(settings.get('retention_days'), chat_lang)
+    # --- Вмешательства ---
+    interventions_allowed = settings.get('allow_interventions', False)
+    intervention_status_text = get_text("settings_interventions_enabled" if interventions_allowed else "settings_interventions_disabled", chat_lang)
+
+    # Форматирование времени генерации (теперь использует безопасный chat_tz_str)
     custom_time_utc_str = settings.get('custom_schedule_time')
-    if custom_time_utc_str:
-        try:
+    time_display = "" # Инициализируем
+    try:
+        schedule_h_utc, schedule_m_utc = SCHEDULE_HOUR, SCHEDULE_MINUTE # Дефолтные UTC
+        if custom_time_utc_str:
             ch, cm = map(int, custom_time_utc_str.split(':'))
-            local_time_str, tz_short = format_time_for_chat(ch, cm, chat_tz_str)
-            # Отображаем локальное время + часовой пояс + UTC в скобках
-            time_display = f"{local_time_str} {tz_short} ({custom_time_utc_str} UTC)"
-        except (ValueError, TypeError):
-            time_display = f"{custom_time_utc_str} UTC (invalid format)" # Ошибка формата
-            logger.warning(f"Invalid custom time format in DB for chat {chat_id}: {custom_time_utc_str}")
-    else:
-        local_time_str, tz_short = format_time_for_chat(SCHEDULE_HOUR, SCHEDULE_MINUTE, chat_tz_str)
-        # Показываем локальное время по умолчанию + пояс + UTC в скобках
-        time_display = f"~{local_time_str} {tz_short} ({SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} UTC)" # Время по умолчанию
+            schedule_h_utc, schedule_m_utc = ch, cm # Используем кастомные UTC
 
-    # Сборка текста сообщения настроек
+        # Вызываем форматирование с гарантированно не-None chat_tz_str
+        local_time_str, tz_short = format_time_for_chat(schedule_h_utc, schedule_m_utc, chat_tz_str)
+
+        time_display = f"{local_time_str} {tz_short}"
+        if custom_time_utc_str:
+            time_display += f" ({custom_time_utc_str} UTC)"
+        else:
+            time_display = f"~{time_display} ({schedule_h_utc:02d}:{schedule_m_utc:02d} UTC)" # Добавляем тильду для дефолта
+
+    except Exception as time_fmt_e:
+         logger.error(f"Error formatting display time for chat {chat_id}: {time_fmt_e}")
+         # Отображаем запасной вариант, если форматирование не удалось
+         time_display = f"{custom_time_utc_str} UTC" if custom_time_utc_str else f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} UTC (Default)"
+
+
+    # Сборка текста сообщения настроек (без изменений)
     text = get_text("settings_title", chat_lang, chat_title=chat_title_safe) + "\n\n"
     text += f"▪️ {get_text('settings_status_label', chat_lang)}: {status_text}\n"
     text += f"▪️ {get_text('settings_language_label', chat_lang)}: {lang_name}\n"
@@ -956,11 +1099,11 @@ async def _display_settings_main(update: Update, context: ContextTypes.DEFAULT_T
     text += f"▪️ {get_text('settings_personality_label', chat_lang)}: {personality_display_name}\n"
     text += f"▪️ {get_text('settings_genre_label', chat_lang)}: {genre_display_name}\n"
     text += f"▪️ {get_text('settings_time_label', chat_lang)}: {time_display}\n"
-    text += f"▪️ {get_text('settings_timezone_label', chat_lang)}: {tz_display_name}\n"
+    text += f"▪️ {get_text('settings_timezone_label', chat_lang)}: {tz_display_name}\n" # Использует безопасный tz_display_name
     text += f"▪️ {get_text('settings_retention_label', chat_lang)}: {retention_display}\n"
     text += f"▪️ {get_text('settings_interventions_label', chat_lang)}: {intervention_status_text}"
 
-    # Сборка клавиатуры
+    # Сборка клавиатуры (без изменений в логике рядов, но использует безопасные переменные)
     # Ряд 1: Статус
     row1 = [InlineKeyboardButton(
         get_text("settings_button_toggle_on" if settings.get('enabled', True) else "settings_button_toggle_off", chat_lang),
@@ -968,7 +1111,7 @@ async def _display_settings_main(update: Update, context: ContextTypes.DEFAULT_T
     )]
     # Ряд 2: Язык, Формат
     row2 = [
-        InlineKeyboardButton(f"🌐 {lang_name.split(' ')[0]}", callback_data='settings_show_lang'), # Используем первую часть имени языка для краткости
+        InlineKeyboardButton(f"🌐 {lang_name.split(' ')[0]}", callback_data='settings_show_lang'),
         InlineKeyboardButton(f"📜 {output_format_display_name}", callback_data='settings_show_format')
     ]
     # Ряд 3: Личность, Жанр
@@ -976,35 +1119,36 @@ async def _display_settings_main(update: Update, context: ContextTypes.DEFAULT_T
         InlineKeyboardButton(f"👤 {personality_display_name}", callback_data='settings_show_personality'),
         InlineKeyboardButton(f"🎭 {genre_display_name}", callback_data='settings_show_genre')
     ]
-    # Ряд 4: Время, Таймзона
+    # Ряд 4: Время, Таймзона (теперь безопасно)
+    # Безопасное отображение времени (избегаем split если time_display - запасной вариант)
+    time_button_text = time_display.split(' ')[0] if ' ' in time_display else time_display
+    # Безопасное отображение таймзоны (tz_display_name гарантированно не None)
+    tz_button_text = tz_display_name.split(' ')[0]
     row4 = [
-        InlineKeyboardButton(f"⏰ {time_display.split(' ')[0]}", callback_data='settings_show_time'), # Показываем только время HH:MM
-        InlineKeyboardButton(f"🌍 {tz_display_name.split(' ')[0]}", callback_data='settings_show_tz') # Показываем только первую часть названия TZ
+        InlineKeyboardButton(f"⏰ {time_button_text}", callback_data='settings_show_time'),
+        InlineKeyboardButton(f"🌍 {tz_button_text}", callback_data='settings_show_tz')
     ]
-    # Ряд 5: Хранение, Вмешательства
+    # Ряд 5: Хранение, Вмешательства (без изменений)
     row5 = [
         InlineKeyboardButton(f"💾 {retention_display}", callback_data='settings_show_retention')
     ]
-    # Логика для кнопки Вмешательств
     if interventions_allowed:
-        # Если ВКЛЮЧЕНО: Кнопка ведет в подменю настроек
-        inter_btn_text = get_text("settings_interventions_label", chat_lang) # Напр: "Вмешательства"
+        inter_btn_text = get_text("settings_interventions_label", chat_lang)
         inter_cb = 'settings_show_interventions'
-        row5.append(InlineKeyboardButton(f"⚙️ {inter_btn_text}", callback_data=inter_cb)) # Используем иконку настроек
+        row5.append(InlineKeyboardButton(f"⚙️ {inter_btn_text}", callback_data=inter_cb))
     else:
-        # Если ВЫКЛЮЧЕНО: Кнопка предлагает включить
-        inter_btn_text = get_text("settings_button_toggle_interventions_off", chat_lang) # Напр: "✅ Разрешить вмешательства"
+        inter_btn_text = get_text("settings_button_toggle_interventions_off", chat_lang)
         inter_cb = 'settings_toggle_interventions'
-        row5.append(InlineKeyboardButton(f"🤖 {inter_btn_text}", callback_data=inter_cb)) # Используем иконку робота
+        row5.append(InlineKeyboardButton(f"🤖 {inter_btn_text}", callback_data=inter_cb))
 
     # Ряд 6: Закрыть
     row6 = [InlineKeyboardButton(get_text("button_close", chat_lang), callback_data='settings_close')]
 
     keyboard_markup = InlineKeyboardMarkup([row1, row2, row3, row4, row5, row6])
 
-    # Отправка или Редактирование сообщения
+    # Отправка или Редактирование сообщения (без изменений)
     query = update.callback_query
-    if query and query.message: # Если вызвано из колбэка, редактируем
+    if query and query.message:
         try:
             await query.edit_message_text(
                 text=text,
@@ -1012,13 +1156,12 @@ async def _display_settings_main(update: Update, context: ContextTypes.DEFAULT_T
                 parse_mode=ParseMode.HTML
             )
         except BadRequest as e:
-            # Игнорируем ошибку "Message is not modified"
             if "Message is not modified" not in str(e):
                 logger.error(f"BadRequest editing settings message: {e}", exc_info=True)
         except TelegramError as e:
              logger.error(f"TelegramError editing settings message: {e}", exc_info=True)
 
-    elif update.message: # Если вызвано командой /story_settings, отправляем новое
+    elif update.message:
         try:
             await update.message.reply_html(text=text, reply_markup=keyboard_markup)
         except TelegramError as e:
@@ -1054,14 +1197,47 @@ async def _display_settings_time(update: Update, context: ContextTypes.DEFAULT_T
 # --- ПОДМЕНЮ ЧАСОВОГО ПОЯСА ---
 async def _display_settings_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
     """Подменю выбора таймзоны."""
-    chat_lang = await get_chat_lang(chat_id); current_tz = dm.get_chat_settings(chat_id).get('timezone', 'UTC')
-    text = get_text("settings_select_timezone_title", chat_lang); rows = []; btns = []
-    sorted_tzs = sorted(COMMON_TIMEZONES.items(), key=lambda item: item[1])
-    for tz_id, tz_name in sorted_tzs: pre = "✅ " if tz_id == current_tz else ""; btn = InlineKeyboardButton(f"{pre}{tz_name}", callback_data=f"settings_set_tz_{tz_id}");
-    if not rows or len(rows[-1]) == 2: rows.append([btn]) # 2 кнопки в ряд
-    else: rows[-1].append(btn)
-    btns.extend(rows); btns.append([InlineKeyboardButton(get_text("button_back", chat_lang), callback_data="settings_main")])
-    await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(btns), parse_mode=ParseMode.HTML)
+    chat_lang = await get_chat_lang(chat_id)
+    current_tz = dm.get_chat_settings(chat_id).get('timezone', 'UTC')
+    text = get_text("settings_select_timezone_title", chat_lang)
+    rows = []
+    btns = [] # Список всех кнопок для клавиатуры
+
+    # Сортируем по имени для лучшего отображения
+    try:
+        # Используем COMMON_TIMEZONES напрямую из импорта config
+        sorted_tzs = sorted(COMMON_TIMEZONES.items(), key=lambda item: item[1])
+    except Exception as e:
+        logger.error(f"Error sorting COMMON_TIMEZONES: {e}")
+        sorted_tzs = [] # Используем пустой список при ошибке
+
+    button_count = 0
+    # ----- НАЧАЛО ЦИКЛА -----
+    for tz_id, tz_name in sorted_tzs: # Итерируемся по отсортированному списку пар (ключ, значение)
+        prefix = "✅ " if tz_id == current_tz else ""
+        btn = InlineKeyboardButton(f"{prefix}{tz_name}", callback_data=f"settings_set_tz_{tz_id}")
+        button_count += 1
+
+        # Логика добавления кнопок в ряды (по 2 в ряд)
+        if not rows or len(rows[-1]) == 2:
+            rows.append([btn]) # Начинаем новый ряд
+        else:
+            rows[-1].append(btn) # Добавляем во второй столбец текущего ряда
+    # ----- КОНЕЦ ЦИКЛА -----
+
+    logger.debug(f"Created {button_count} timezone buttons. Number of rows: {len(rows)}") # Добавим лог
+
+    # Собираем финальный список рядов для клавиатуры
+    btns.extend(rows) # Добавляем все созданные ряды с кнопками таймзон
+    btns.append([InlineKeyboardButton(get_text("button_back", chat_lang), callback_data="settings_main")]) # Добавляем кнопку "Назад"
+
+    # Редактируем сообщение
+    try:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(btns), parse_mode=ParseMode.HTML)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e): logger.error(f"Failed to edit timezone menu: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error editing timezone menu: {e}")
 
 # --- ПОДМЕНЮ ЖАНРА ---
 async def _display_settings_genre(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
