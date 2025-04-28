@@ -15,7 +15,7 @@ import data_manager as dm
 import gemini_client as gc
 from config import (
     BOT_OWNER_ID, SCHEDULE_HOUR, SCHEDULE_MINUTE, JOB_CHECK_INTERVAL_MINUTES,
-    # PURGE_JOB_INTERVAL_HOURS не используется напрямую здесь, интервал берется из main.py
+    DEFAULT_OUTPUT_FORMAT, DEFAULT_PERSONALITY # Добавлены для использования в коде
 )
 from localization import get_text, get_chat_lang, get_output_format_name # Добавили get_output_format_name
 from utils import download_images, MAX_PHOTOS_TO_ANALYZE, notify_owner
