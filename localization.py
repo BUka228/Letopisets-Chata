@@ -86,7 +86,7 @@ LOCALIZED_TEXTS: Dict[str, Dict[str, str]] = {
         "story_sent": "{output_format_name_capital} отправлена.",
         "regenerate_no_data": "🤷‍♀️ Нечего перегенерировать.",
         "regenerating": "⏳ Пересоздаю {output_format_name}...",
-        "daily_story_header": "📅 <b>{output_format_name_capital} за {date_str} в чате {chat_title}</b> ✨\n{photo_info}\n" + "-"*20 + "\n", # Убрал \\n
+        "daily_story_header": "📅 <b>{output_format_name_capital} за {date_str} в чате {chat_title}</b> ✨\n{photo_info}\n" + "-"*20 + "\n",
         "daily_job_failed_chat_user_friendly": "😔 Сегодня не удалось создать {output_format_name} ({reason}).",
         "photo_info_text": " <i>(с анализом до {count} фото)</i>",
         "output_format_name_story": "историю", "output_format_name_digest": "дайджест", # В винительном падеже
@@ -129,17 +129,18 @@ LOCALIZED_TEXTS: Dict[str, Dict[str, str]] = {
         "settings_button_toggle_on": "❌ Выключить Летописца",
         "settings_button_toggle_off": "✅ Включить Летописца",
         "settings_saved_popup": "✅ Сохранено!",
-        "retention_days_0": "Бессрочно",
+        "retention_days_0": "Бессрочно", # Остается для логики, но не в кнопках
+        "retention_days_7": "7 дней",     # Новая опция
+        "retention_days_14": "14 дней",   # Новая опция
         "retention_days_N": "{N} дн.",
         "intervention_state_enabled": "Разрешены",
         "intervention_state_disabled": "Запрещены",
+        "settings_interventions_enabled": "✅ Разрешены", # Для главного меню
+        "settings_interventions_disabled": "❌ Запрещены", # Для главного меню
 
         # Подменю Языка
         "settings_select_language_title": "🌐 Выберите язык:",
         "settings_lang_selected": "✅ Язык изменен!",
-        
-        "settings_interventions_enabled": "✅ Разрешены",
-        "settings_interventions_disabled": "❌ Запрещены",
 
         # Подменю Времени
         "settings_select_time_title": "⏰ <b>Настройка времени генерации</b>",
@@ -167,27 +168,26 @@ LOCALIZED_TEXTS: Dict[str, Dict[str, str]] = {
         "settings_select_output_format_title": "📜 Выберите формат ежедневной сводки:",
         "settings_format_selected": "✅ Формат изменен!",
 
-        # Подменю Срока Хранения
-        "settings_select_retention_title": "💾 Срок хранения сообщений в этом чате:",
+        # Подменю Срока Хранения (Изменен заголовок)
+        "settings_select_retention_title": "💾 Срок хранения сообщений (выберите период):",
         "settings_retention_selected": "✅ Срок хранения изменен!",
-        "settings_retention_button_days": "{days_text}", # Для кнопок выбора дней
+        "settings_retention_button_days": "{days_text}", # Используется для всех опций дней
 
-        # Подменю Вмешательств
-        "settings_interventions_title": "🤖 Настройка Вмешательств",
+        # Подменю Вмешательств (Обновлено)
+        "settings_interventions_title": "🤖 Настройка Вмешательств Летописца",
+        "settings_interventions_description": "Здесь можно настроить, как часто и при каких условиях Летописец будет оставлять свои комментарии в чате.",
         "settings_button_toggle_interventions_on": "❌ Запретить Вмешательства",
         "settings_button_toggle_interventions_off": "✅ Разрешить Вмешательства",
-        "settings_interventions_status": "Текущий статус: <b>{status}</b>",
-        "settings_interventions_warning": "⚠️ Если включено, бот будет изредка оставлять короткие комментарии (в зависимости от выбранной Личности и настроек ниже).",
-        "settings_intervention_cooldown_label": "Кулдаун (мин)",
-        "settings_intervention_min_msgs_label": "Мин.Сообщ.",
-        "settings_intervention_timespan_label": "Окно (мин)",
-        "settings_intervention_current_value": "Текущее: <b>{value}</b>\n<i>(Доступно: {min_val}-{max_val} | Стандартно: {def_val})</i>",
-        "settings_interventions_change_hint": "Нажмите кнопку для выбора нового значения:",
+        "settings_intervention_cooldown_label": "Интервал (пауза)",
+        "settings_intervention_min_msgs_label": "Минимум сообщений",
+        "settings_intervention_timespan_label": "Окно активности",
+        "settings_intervention_current_value": "Текущее: <b>{value}</b>\n<i>(Пределы: {min_val}-{max_val} | Стандарт: {def_val})</i>",
+        "settings_interventions_change_hint": "Выберите новое значение:",
+        "settings_intervention_owner_note": "\n\n👑 <i>Как владелец, вы видите доп. опции для более частого интервала.</i>",
         "settings_interventions_saved_popup": "✅ Настройки вмешательств сохранены!",
         "settings_intervention_btn_cooldown": "{minutes} мин",
         "settings_intervention_btn_msgs": "{count} сообщ.",
         "settings_intervention_btn_timespan": "{minutes} мин",
-
 
         # Названия для локализации
         "genre_name_default": "Стандартный", "genre_name_humor": "Юмористический", "genre_name_detective": "Детективный", "genre_name_fantasy": "Фэнтезийный", "genre_name_news_report": "Новостной репортаж",
@@ -201,6 +201,8 @@ LOCALIZED_TEXTS: Dict[str, Dict[str, str]] = {
         "purge_prompt": "🗑️ Вы уверены, что хотите удалить сообщения?\nПериод: <b>{period_text}</b>\n\n<b>Это действие необратимо!</b>",
         "purge_period_all": "Вся история чата",
         "purge_period_days": "Старше {days} дней",
+        "purge_period_days_7": "Старше 7 дней",   # Новый текст
+        "purge_period_days_14": "Старше 14 дней", # Новый текст
         "purge_confirm": "Да, удалить",
         "purge_cancel": "Отмена",
         "purge_success": "✅ История чата успешно очищена (период: {period_text}).",
@@ -216,6 +218,7 @@ LOCALIZED_TEXTS: Dict[str, Dict[str, str]] = {
         "stats_total_messages": "Всего сообщений: <b>{count}</b>",
         "stats_photos": "Изображений: {count}",
         "stats_stickers": "Стикеров: {count}",
+        "stats_active_users": "Активных участников: <b>{count}</b>", # Добавил
         "stats_top_users_header": "Топ-3 участников по сообщениям:",
         "stats_user_entry": "  - {username}: {count}",
         "stats_no_data": "🤷‍♀️ Нет данных для статистики за этот период.",
@@ -232,7 +235,6 @@ LOCALIZED_TEXTS: Dict[str, Dict[str, str]] = {
         "cmd_chat_stats_desc": "📈 Статистика активности чата",
         "cmd_purge_history_desc": "🗑️ Очистить историю сообщений (Админ)",
         "cmd_status_desc": "📊 Статус бота (Владелец)",
-        # Убрали /onthisday, /set_language, /set_timezone
     },
     "en": {
         # --- General ---
@@ -293,9 +295,6 @@ Analyzing chat, creating unique summaries.
         "proxy_note": "ℹ️ <i>Note: {note}</i>", "error_proxy_generic": "AI service unavailable", "error_proxy_timeout": "AI service timed out",
         "error_proxy_connect": "Network error (AI)", "error_proxy_safety": "Blocked by AI safety", "error_proxy_config_user": "Configuration error",
         "error_proxy_unknown_user": "Unknown AI error", "error_proxy_empty_response": "AI service returned empty response",
-        
-        "settings_interventions_enabled": "✅ Allowed",
-        "settings_interventions_disabled": "❌ Forbidden",
 
         # --- Settings ---
         "settings_title": "⚙️ <b>Chronicler Settings ({chat_title})</b>",
@@ -305,8 +304,14 @@ Analyzing chat, creating unique summaries.
         "settings_time_custom": "{custom_time} (yours)", "settings_time_default": "~{default_local_time} (default)",
         "settings_button_change": "Change", "settings_button_toggle_on": "❌ Disable Chronicler", "settings_button_toggle_off": "✅ Enable Chronicler",
         "settings_saved_popup": "✅ Saved!",
-        "retention_days_0": "Forever", "retention_days_N": "{N} days",
-        "intervention_state_enabled": "Allowed", "intervention_state_disabled": "Forbidden",
+        "retention_days_0": "Forever", # Remains for logic, not buttons
+        "retention_days_7": "7 days",   # New option
+        "retention_days_14": "14 days", # New option
+        "retention_days_N": "{N} days",
+        "intervention_state_enabled": "Allowed",
+        "intervention_state_disabled": "Forbidden",
+        "settings_interventions_enabled": "✅ Allowed", # For main menu
+        "settings_interventions_disabled": "❌ Forbidden", # For main menu
 
         # Submenus...
         "settings_select_language_title": "🌐 Select language:", "settings_lang_selected": "✅ Language changed!",
@@ -318,15 +323,27 @@ Analyzing chat, creating unique summaries.
         "settings_select_genre_title": "🎭 Select genre:", "settings_genre_selected": "✅ Genre changed!",
         "settings_select_personality_title": "👤 Select Personality:", "settings_personality_selected": "✅ Personality changed!",
         "settings_select_output_format_title": "📜 Select Output Format:", "settings_format_selected": "✅ Format changed!",
-        "settings_select_retention_title": "💾 Message Retention Period:", "settings_retention_selected": "✅ Retention changed!",
-        "settings_retention_button_days": "{days_text}",
-        "settings_interventions_title": "🤖 Intervention Settings",
-        "settings_button_toggle_interventions_on": "❌ Forbid Interventions", "settings_button_toggle_interventions_off": "✅ Allow Interventions",
-        "settings_interventions_status": "Current status: <b>{status}</b>", "settings_interventions_warning": "⚠️ If enabled, the bot will occasionally post short comments (based on its Personality and settings below).",
-        "settings_intervention_cooldown_label": "Cooldown (min)", "settings_intervention_min_msgs_label": "Min Msgs", "settings_intervention_timespan_label": "Window (min)",
+
+        # Retention Submenu (Title changed)
+        "settings_select_retention_title": "💾 Message Retention Period (select period):",
+        "settings_retention_selected": "✅ Retention changed!",
+        "settings_retention_button_days": "{days_text}", # Used for all day options
+
+        # Interventions Submenu (Updated)
+        "settings_interventions_title": "🤖 Chronicler Intervention Settings",
+        "settings_interventions_description": "Configure how often and under what conditions the Chronicler comments in the chat.",
+        "settings_button_toggle_interventions_on": "❌ Forbid Interventions",
+        "settings_button_toggle_interventions_off": "✅ Allow Interventions",
+        "settings_intervention_cooldown_label": "Interval (Pause)",
+        "settings_intervention_min_msgs_label": "Minimum Messages",
+        "settings_intervention_timespan_label": "Activity Window",
         "settings_intervention_current_value": "Current: <b>{value}</b>\n<i>(Range: {min_val}-{max_val} | Default: {def_val})</i>",
-        "settings_interventions_change_hint": "Select a new value:", "settings_interventions_saved_popup": "✅ Intervention settings saved!",
-        "settings_intervention_btn_cooldown": "{minutes} min", "settings_intervention_btn_msgs": "{count} msgs", "settings_intervention_btn_timespan": "{minutes} min",
+        "settings_interventions_change_hint": "Select a new value:",
+        "settings_intervention_owner_note": "\n\n👑 <i>As the owner, you see extra options for more frequent intervals.</i>",
+        "settings_interventions_saved_popup": "✅ Intervention settings saved!",
+        "settings_intervention_btn_cooldown": "{minutes} min",
+        "settings_intervention_btn_msgs": "{count} msgs",
+        "settings_intervention_btn_timespan": "{minutes} min",
 
         # Names for localization
         "genre_name_default": "Standard", "genre_name_humor": "Humorous", "genre_name_detective": "Detective", "genre_name_fantasy": "Fantasy", "genre_name_news_report": "News Report",
@@ -338,12 +355,17 @@ Analyzing chat, creating unique summaries.
 
         # Purge History
         "purge_prompt": "🗑️ Are you sure you want to purge messages?\nPeriod: <b>{period_text}</b>\n\n<b>This action is irreversible!</b>",
-        "purge_period_all": "All chat history", "purge_period_days": "Older than {days} days",
-        "purge_confirm": "Yes, Purge", "purge_cancel": "Cancel",
+        "purge_period_all": "All chat history",
+        "purge_period_days": "Older than {days} days",
+        "purge_period_days_7": "Older than 7 days",   # New text
+        "purge_period_days_14": "Older than 14 days", # New text
+        "purge_confirm": "Yes, Purge",
+        "purge_cancel": "Cancel",
         "purge_success": "✅ Chat history successfully purged (Period: {period_text}).",
         "purge_no_args": "Specify period: <code>/purge_history all</code> or <code>/purge_history days N</code> (where N is days).",
         "purge_invalid_days": "Please specify a valid number of days (N > 0).",
-        "purge_cancelled": "History purge cancelled.", "purge_error": "😔 Failed to purge history.",
+        "purge_cancelled": "History purge cancelled.",
+        "purge_error": "😔 Failed to purge history.",
 
         # Chat Stats
         "stats_prompt_period": "📈 Select period for statistics:",
@@ -352,6 +374,7 @@ Analyzing chat, creating unique summaries.
         "stats_total_messages": "Total Messages: <b>{count}</b>",
         "stats_photos": "Photos: {count}",
         "stats_stickers": "Stickers: {count}",
+        "stats_active_users": "Active Users: <b>{count}</b>", # Added
         "stats_top_users_header": "Top-3 Users by Messages:",
         "stats_user_entry": "  - {username}: {count}",
         "stats_no_data": "🤷‍♀️ No data available for statistics in this period.",
@@ -368,7 +391,6 @@ Analyzing chat, creating unique summaries.
         "cmd_chat_stats_desc": "📈 Chat activity statistics",
         "cmd_purge_history_desc": "🗑️ Purge message history (Admin)",
         "cmd_status_desc": "📊 Bot status (Owner)",
-        # Removed /onthisday, /set_language, /set_timezone
     }
 }
 
@@ -442,8 +464,15 @@ def get_output_format_name(format_key: str, lang: str, capital: bool = False) ->
 
 def format_retention_days(days: Optional[int], lang: str) -> str:
     """Форматирует срок хранения для отображения."""
-    if days is None or days <= 0: return get_text("retention_days_0", lang)
-    return get_text("retention_days_N", lang, N=days)
+    if days is None or days <= 0:
+        # Используем ключ 'retention_days_0' для "Бессрочно"/"Forever"
+        return get_text("retention_days_0", lang)
+    elif days in [7, 14]: # Добавляем обработку новых периодов
+        # Используем ключи 'retention_days_7', 'retention_days_14'
+         return get_text(f"retention_days_{days}", lang)
+    else:
+        # Используем общий ключ 'retention_days_N' для остальных
+        return get_text("retention_days_N", lang, N=days)
 
 def get_intervention_value_limits(setting_key: str) -> Tuple[int, int, int]:
     """Возвращает кортеж (min, max, default) для настройки вмешательства."""

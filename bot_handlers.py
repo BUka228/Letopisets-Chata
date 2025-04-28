@@ -18,6 +18,7 @@ from typing import Optional, Dict, Any, Tuple, List
 import data_manager as dm
 import gemini_client as gc
 from config import (
+    
     SCHEDULE_HOUR, SCHEDULE_MINUTE, DEFAULT_LANGUAGE, COMMON_TIMEZONES,
     SUPPORTED_LANGUAGES, SUPPORTED_GENRES, SUPPORTED_PERSONALITIES,
     SUPPORTED_OUTPUT_FORMATS, BOT_OWNER_ID, DEFAULT_RETENTION_DAYS,  DEFAULT_OUTPUT_FORMAT, DEFAULT_PERSONALITY,
@@ -1268,98 +1269,141 @@ async def _display_settings_output_format(update: Update, context: ContextTypes.
 
 # --- ПОДМЕНЮ СРОКА ХРАНЕНИЯ ---
 async def _display_settings_retention(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
-    """Подменю выбора срока хранения."""
-    chat_lang = await get_chat_lang(chat_id); current = dm.get_chat_settings(chat_id).get('retention_days') # Может быть None
-    text = get_text("settings_select_retention_title", chat_lang); btns = []
-    options = [30, 90, 180, 365, 0] # 0 - Вечно (None в БД)
-    for days in options:
-        val = days if days > 0 else None
+    """Подменю выбора срока хранения (без опций 0 и 365, добавлены короткие)."""
+    chat_lang = await get_chat_lang(chat_id)
+    current = dm.get_chat_settings(chat_id).get('retention_days') # Может быть None
+
+    text = get_text("settings_select_retention_title", chat_lang) # Используем обновленный заголовок
+    btns = []
+
+    # --- ИЗМЕНЕНО: Список опций для кнопок ---
+    # Убраны 0 (Вечно) и 365, добавлены 7 и 14
+    options_days = [7, 14, 30, 90, 180]
+    # -------------------------------------------
+
+    for days in options_days:
+        val = days # val теперь всегда > 0
         pre = "✅ " if val == current else ""
+        # Используем обновленную format_retention_days, которая знает про 7 и 14
         btn_text = format_retention_days(val, chat_lang)
-        cb_data = f"settings_set_retention_{days if days > 0 else 'inf'}"
+        cb_data = f"settings_set_retention_{days}" # Callback остается прежним
         btns.append([InlineKeyboardButton(f"{pre}{btn_text}", callback_data=cb_data)])
+
+    # Добавляем кнопку "Назад"
     btns.append([InlineKeyboardButton(get_text("button_back", chat_lang), callback_data="settings_main")])
     await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(btns), parse_mode=ParseMode.HTML)
 
 # --- ПОДМЕНЮ НАСТРОЕК ВМЕШАТЕЛЬСТВ ---
 async def _display_settings_interventions(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
-    """Отображает подменю настроек Вмешательств Летописца."""
+    """
+    Отображает улучшенное подменю настроек Вмешательств Летописца.
+    Использует новые диапазоны и опции для кнопок.
+    """
     query = update.callback_query
-    if not query: # This function should only be called from a callback query
+    if not query:
         logger.warning("_display_settings_interventions called without a query.")
         return
 
     chat_lang = await get_chat_lang(chat_id)
-    # Получаем *фактические* настройки (с дефолтами, если NULL в БД)
     inter_settings = dm.get_intervention_settings(chat_id)
     current_cooldown = inter_settings.get('cooldown_minutes', INTERVENTION_DEFAULT_COOLDOWN_MIN)
     current_min_msgs = inter_settings.get('min_msgs', INTERVENTION_DEFAULT_MIN_MSGS)
     current_timespan = inter_settings.get('timespan_minutes', INTERVENTION_DEFAULT_TIMESPAN_MIN)
 
-    # Формирование текста сообщения
-    text = f"<b>{get_text('settings_interventions_title', chat_lang)}</b>\n\n"
-    # Cooldown
+    # --- Формирование текста сообщения (используем обновленные ключи локализации) ---
+    text = f"<b>{get_text('settings_interventions_title', chat_lang)}</b>\n"
+    text += f"<i>{get_text('settings_interventions_description', chat_lang)}</i>\n\n"
+
+    # 1. Настройка Интервала (Cooldown)
+    # Передаем актуальные лимиты/дефолты в форматирование
     limits_cd = {'min_val': INTERVENTION_MIN_COOLDOWN_MIN, 'max_val': INTERVENTION_MAX_COOLDOWN_MIN, 'def_val': INTERVENTION_DEFAULT_COOLDOWN_MIN}
-    text += f"▪️ <b>{get_text('settings_intervention_cooldown_label', chat_lang)}:</b>\n"
-    text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_cooldown, **limits_cd)}\n"
-    # Min Messages
+    text += f"▪️ <b>{get_text('settings_intervention_cooldown_label', chat_lang)}:</b> Пауза между комментариями.\n"
+    text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_cooldown, **limits_cd)}\n\n"
+
+    # 2. Настройка Мин. Сообщений
     limits_mm = {'min_val': INTERVENTION_MIN_MIN_MSGS, 'max_val': INTERVENTION_MAX_MIN_MSGS, 'def_val': INTERVENTION_DEFAULT_MIN_MSGS}
-    text += f"▪️ <b>{get_text('settings_intervention_min_msgs_label', chat_lang)}:</b>\n"
-    text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_min_msgs, **limits_mm)}\n"
-    # Timespan
+    text += f"▪️ <b>{get_text('settings_intervention_min_msgs_label', chat_lang)}:</b> Сколько сообщений должно появиться в 'Окне активности', чтобы бот мог среагировать.\n"
+    text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_min_msgs, **limits_mm)}\n\n"
+
+    # 3. Настройка Окна Активности (Timespan)
     limits_ts = {'min_val': INTERVENTION_MIN_TIMESPAN_MIN, 'max_val': INTERVENTION_MAX_TIMESPAN_MIN, 'def_val': INTERVENTION_DEFAULT_TIMESPAN_MIN}
-    text += f"▪️ <b>{get_text('settings_intervention_timespan_label', chat_lang)}:</b>\n"
+    text += f"▪️ <b>{get_text('settings_intervention_timespan_label', chat_lang)}:</b> Период времени, за который считаются 'Мин. сообщения'.\n"
     text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_timespan, **limits_ts)}\n\n"
+
     text += f"<i>{get_text('settings_interventions_change_hint', chat_lang)}</i>"
+
+    is_owner = (user_id == BOT_OWNER_ID)
+    if is_owner:
+        text += get_text("settings_intervention_owner_note", chat_lang) # Примечание для владельца
 
     # --- Формирование кнопок ---
     button_rows = []
 
     # 1. Кнопка "Запретить вмешательства"
-    disable_text = get_text("settings_button_toggle_interventions_on", chat_lang) # Text like "❌ Forbid..."
+    disable_text = get_text("settings_button_toggle_interventions_on", chat_lang)
     button_rows.append([InlineKeyboardButton(disable_text, callback_data="settings_toggle_interventions")])
 
-    # 2. Кнопки Cooldown (1ч, 3ч, 6ч, 12ч, 24ч)
-    cd_options = [60, 180, 360, 720, 1440]
-    cd_btns = []
-    for cd in cd_options:
+    # 2. Кнопки Интервала (Cooldown) - НОВЫЕ ОПЦИИ
+    standard_cd_options = [60, 120, 240, 480]   # Стандарт: 1ч, 2ч, 4ч, 8ч
+    frequent_cd_options = [15, 30]              # Владелец: 15м, 30м
+    all_cd_options = standard_cd_options
+    if is_owner:
+        all_cd_options = frequent_cd_options + standard_cd_options
+        all_cd_options.sort()
+
+    cd_btns_row1 = []
+    cd_btns_row2 = []
+    for cd in all_cd_options:
         prefix = "✅ " if cd == current_cooldown else ""
-        hours = cd // 60
-        text_val = f"{hours} ч" if hours > 0 else f"{cd} мин" # Отображаем часы
-        # Проверяем, попадает ли значение в лимиты, чтобы не предлагать невалидные опции (на всякий случай)
+        text_val = get_text("settings_intervention_btn_cooldown", chat_lang, minutes=cd)
+        # Используем актуальные лимиты для проверки
         if INTERVENTION_MIN_COOLDOWN_MIN <= cd <= INTERVENTION_MAX_COOLDOWN_MIN:
-            cd_btns.append(InlineKeyboardButton(f"{prefix}{text_val}", callback_data=f"settings_set_cooldown_{cd}"))
-    # Размещаем кнопки кулдауна в 1 или 2 ряда
-    if len(cd_btns) <= 3: button_rows.append(cd_btns)
-    elif len(cd_btns) <= 6: button_rows.append(cd_btns[:3]); button_rows.append(cd_btns[3:])
-    else: button_rows.append(cd_btns) # Default to one row if more than 6
+            btn = InlineKeyboardButton(f"{prefix}{text_val}", callback_data=f"settings_set_cooldown_{cd}")
+            if len(cd_btns_row1) < 4: # Попробуем по 4 кнопки в ряд
+                 cd_btns_row1.append(btn)
+            elif len(cd_btns_row2) < 4:
+                 cd_btns_row2.append(btn)
+    if cd_btns_row1: button_rows.append(cd_btns_row1)
+    if cd_btns_row2: button_rows.append(cd_btns_row2)
 
-    # 3. Кнопки Min Msgs (3, 5, 7, 10)
-    mm_options = [3, 5, 7, 10]
+    # 3. Кнопки Мин. Сообщений - НОВЫЕ ОПЦИИ
+    standard_mm_options = [5, 10, 15, 25] # Стандарт
+    frequent_mm_options = [3]            # Владелец
+    all_mm_options = standard_mm_options
+    if is_owner:
+        all_mm_options = frequent_mm_options + standard_mm_options
+        all_mm_options.sort()
+
     mm_btns = []
-    for mm in mm_options:
+    for mm in all_mm_options:
         prefix = "✅ " if mm == current_min_msgs else ""
-        # Проверка лимитов
+        # Используем актуальные лимиты
         if INTERVENTION_MIN_MIN_MSGS <= mm <= INTERVENTION_MAX_MIN_MSGS:
-            mm_btns.append(InlineKeyboardButton(f"{prefix}{mm}", callback_data=f"settings_set_minmsgs_{mm}"))
-    if mm_btns: button_rows.append(mm_btns)
+            text_val = get_text("settings_intervention_btn_msgs", chat_lang, count=mm)
+            mm_btns.append(InlineKeyboardButton(f"{prefix}{text_val}", callback_data=f"settings_set_minmsgs_{mm}"))
+    if mm_btns: button_rows.append(mm_btns) # В один ряд
 
-    # 4. Кнопки Timespan (5м, 10м, 15м, 30м)
-    ts_options = [5, 10, 15, 30]
+    # 4. Кнопки Окна Активности (Timespan) - БЕЗ ИЗМЕНЕНИЙ
+    ts_options = [5, 10, 15, 30, 60]
     ts_btns = []
     for ts in ts_options:
         prefix = "✅ " if ts == current_timespan else ""
-        # Проверка лимитов
         if INTERVENTION_MIN_TIMESPAN_MIN <= ts <= INTERVENTION_MAX_TIMESPAN_MIN:
-            ts_btns.append(InlineKeyboardButton(f"{prefix}{ts} м", callback_data=f"settings_set_timespan_{ts}"))
-    if ts_btns: button_rows.append(ts_btns)
+            text_val = get_text("settings_intervention_btn_timespan", chat_lang, minutes=ts)
+            ts_btns.append(InlineKeyboardButton(f"{prefix}{text_val}", callback_data=f"settings_set_timespan_{ts}"))
+    if ts_btns: button_rows.append(ts_btns) # В один ряд
 
     # 5. Кнопка "Назад"
     button_rows.append([InlineKeyboardButton(get_text("button_back", chat_lang), callback_data="settings_main")])
 
     # Редактируем сообщение
-    await query.edit_message_text(
-        text=text,
-        reply_markup=InlineKeyboardMarkup(button_rows),
-        parse_mode=ParseMode.HTML
-    )
+    try:
+        await query.edit_message_text(
+            text=text,
+            reply_markup=InlineKeyboardMarkup(button_rows),
+            parse_mode=ParseMode.HTML
+        )
+    except BadRequest as e:
+        if "Message is not modified" not in str(e): logger.error(f"Failed intervention settings edit: {e}")
+    except Exception as e:
+         logger.error(f"Unexpected error editing intervention settings: {e}", exc_info=True)
