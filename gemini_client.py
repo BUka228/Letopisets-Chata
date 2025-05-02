@@ -270,7 +270,7 @@ async def safe_generate_summary(
 
 
 async def safe_generate_intervention(
-    # ИЗМЕНЕНО: Принимаем готовую строку промпта
+    # ПАРАМЕТР УЖЕ ПРАВИЛЬНЫЙ: Принимаем готовую строку промпта
     intervention_prompt_string: Optional[str],
     lang: str = DEFAULT_LANGUAGE # Оставляем lang на всякий случай
 ) -> Optional[str]:
@@ -279,23 +279,22 @@ async def safe_generate_intervention(
     Использует урезанные настройки retry/timeout.
     В случае ошибки возвращает None и логирует ее (НЕ user-friendly ошибку).
     """
+    # КОД ЭТОЙ ФУНКЦИИ ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ (как в вашем последнем бандле),
+    # так как он уже принимает intervention_prompt_string.
 
     if not intervention_prompt_string:
         logger.debug("safe_generate_intervention received empty prompt string.")
         return None
 
-    # Используем переданный промпт
     payload = {"content": [intervention_prompt_string]}
 
     try:
-        # Вызываем прокси со специальными настройками retry/timeout
         response_data = await _call_proxy(
             payload,
-            use_intervention_retry=True, # <<-- Важно!
-            timeout=INTERVENTION_TIMEOUT_SEC # <<-- Важно!
+            use_intervention_retry=True,
+            timeout=INTERVENTION_TIMEOUT_SEC
         )
 
-        # Остальная логика обработки ответа остается без изменений...
         if isinstance(response_data, dict) and "response" in response_data:
              result_text = response_data["response"].strip()
              if result_text:
@@ -304,13 +303,11 @@ async def safe_generate_intervention(
                  logger.warning("Intervention AI returned empty response text.")
                  return None
         else:
-            # Логируем ошибку, если она была от прокси или формат неверный
             if isinstance(response_data, dict) and "error" in response_data:
                  logger.warning(f"Intervention generation failed: {response_data['error']}")
             else:
                  logger.warning(f"Intervention generation got unexpected response: {response_data}")
             return None
     except (RetryError, ValueError, Exception) as e:
-        # Любая ошибка после ретраев или др. - просто логируем как Warning и возвращаем None
         logger.warning(f"Exception during intervention generation after retries: {e.__class__.__name__}: {e}", exc_info=(not isinstance(e, RetryError)))
         return None

@@ -26,7 +26,7 @@ from config import (
     # Лимиты и дефолты для вмешательств
     INTERVENTION_MIN_COOLDOWN_MIN, INTERVENTION_MAX_COOLDOWN_MIN, INTERVENTION_DEFAULT_COOLDOWN_MIN,
     INTERVENTION_MIN_MIN_MSGS, INTERVENTION_MAX_MIN_MSGS, INTERVENTION_DEFAULT_MIN_MSGS,
-    INTERVENTION_MIN_TIMESPAN_MIN, INTERVENTION_MAX_TIMESPAN_MIN, INTERVENTION_DEFAULT_TIMESPAN_MIN,
+    INTERVENTION_MIN_TIMESPAN_MIN, INTERVENTION_MAX_TIMESPAN_MIN, INTERVENTION_DEFAULT_TIMESPAN_MIN, INTERVENTION_PROMPT_MESSAGE_COUNT,
      INTERVENTION_CONTEXT_HOURS
 )
 from localization import (
@@ -889,14 +889,14 @@ async def _check_and_trigger_intervention(chat_id: int, context: ContextTypes.DE
 async def _try_send_intervention(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     """
     Внутренняя ФОНОВАЯ ЗАДАЧА: Генерирует и пытается отправить
-    комментарий-вмешательство в чат, используя контекст за последние N часов.
-    (Версия с максимальным логированием для поиска проблемы с context_texts)
+    комментарий-вмешательство в чат, используя контекст последних N сообщений
+    и информацию об авторах.
     """
     if not context.bot:
         logger.error(f"Intervention task c={chat_id}: Bot object not found in context.")
         return
 
-    log_prefix = f"Intervention task c={chat_id}:" # Префикс для логов этой задачи
+    log_prefix = f"Intervention task c={chat_id}:"
 
     try:
         # 1. Получаем настройки
@@ -906,93 +906,97 @@ async def _try_send_intervention(chat_id: int, context: ContextTypes.DEFAULT_TYP
             return
 
         personality = settings.get('story_personality', DEFAULT_PERSONALITY)
-        lang = settings.get('lang', DEFAULT_LANGUAGE) # Язык пока не сильно используется в промпте, но передаем
+        lang = settings.get('lang', DEFAULT_LANGUAGE)
 
-        # 2. Получаем сообщения из БД
-        all_messages_since = [] # Инициализируем
+        # 2. Получаем ПОСЛЕДНИЕ N сообщений (с полной информацией)
+        last_n_messages = []
         try:
-            since_dt = datetime.datetime.now(pytz.utc) - datetime.timedelta(hours=INTERVENTION_CONTEXT_HOURS)
-            all_messages_since = dm.get_messages_for_chat_since(chat_id, since_dt)
-            # Логгируем количество полученных записей *из БД*
-            logger.debug(f"{log_prefix} Fetched {len(all_messages_since)} records from DB since {since_dt.isoformat()}")
-            # --- ДОПОЛНИТЕЛЬНЫЙ ЛОГ: Первые 5 записей из БД ---
-            if all_messages_since:
-                 logger.debug(f"{log_prefix} First 5 records raw from DB: {all_messages_since[:5]}")
-            # -----------------------------------------------
-        except Exception as db_err:
-            logger.error(f"{log_prefix} Failed to fetch messages: {db_err}", exc_info=True)
-            return
-
-        # 3. Фильтрация и извлечение ТЕКСТА
-        context_texts = [] # Инициализируем
-        if all_messages_since:
-            logger.debug(f"{log_prefix} Starting filtering of {len(all_messages_since)} records...")
-            try:
-                # ----------- НАЧАЛО ФИЛЬТРАЦИИ -----------
-                context_texts_intermediate = []
-                for i, m in enumerate(all_messages_since):
-                     # Логируем КАЖДОЕ сообщение перед фильтрацией
-                     logger.debug(f"{log_prefix} Record {i}: {m}")
-                     if isinstance(m, dict) and m.get('type') == 'text' and m.get('content'):
-                         content_value = m.get('content', '')
-                         logger.debug(f"{log_prefix} Record {i} PASSED filter. Content: '{content_value}'")
-                         context_texts_intermediate.append(str(content_value)) # Добавляем во временный список
-                     else:
-                         logger.debug(f"{log_prefix} Record {i} FAILED filter (type={m.get('type')}, has_content={bool(m.get('content'))})")
-                context_texts = context_texts_intermediate # Присваиваем результат основному списку
-                # ----------- КОНЕЦ ФИЛЬТРАЦИИ -----------
-                logger.info(f"{log_prefix} Filtered {len(context_texts)} non-empty text messages.")
-            except Exception as filter_err:
-                logger.error(f"{log_prefix} Error during message filtering loop: {filter_err}", exc_info=True)
-                # Решаем, продолжать ли с пустым списком или выйти
-                # В данном случае, если ошибка фильтрации, лучше выйти
-                return
-
-        # ====================================================================
-        # !!! КРИТИЧЕСКИ ВАЖНЫЙ ЛОГ !!! (Уровень WARNING для видимости)
-        # Выводим содержимое списка context_texts СРАЗУ ПОСЛЕ его формирования
-        # ====================================================================
-        logger.warning(f"{log_prefix} -----> ACTUAL context_texts LIST BEFORE PROMPT BUILD: {context_texts}")
-
-        # 4. Проверяем список на пустоту
-        if not context_texts:
-            logger.debug(f"{log_prefix} context_texts list is empty, skipping prompt generation.")
-            return
-
-        # 5. Построение промпта
-        intervention_prompt_string = None # Инициализируем
-        try:
-            # Передаем ТОЧНО тот список, что залогировали выше
-            intervention_prompt_string = pb.build_intervention_prompt(context_texts, personality)
-            if intervention_prompt_string:
-                 logger.debug(f"{log_prefix} Prompt string built successfully (length: {len(intervention_prompt_string)}).")
+            limit_msgs = INTERVENTION_PROMPT_MESSAGE_COUNT
+            last_n_messages = dm.get_messages_for_chat_last_n(
+                chat_id,
+                limit=limit_msgs,
+                only_text=False # Нам нужны имена, берем все сообщения
+            )
+            logger.debug(f"{log_prefix} Fetched last {len(last_n_messages)} messages (limit: {limit_msgs}).")
+            if last_n_messages:
+                logger.debug(f"{log_prefix} Last 5 message records for context: {last_n_messages[-5:]}")
             else:
-                 # Эта ветка должна сработать, если build_intervention_prompt вернул None
-                 logger.warning(f"{log_prefix} Prompt builder returned None or empty string despite non-empty context_texts.")
-                 return # Выходим, если промпт не удалось построить
+                logger.debug(f"{log_prefix} No recent messages found.")
+                return # Нечего анализировать
+        except Exception as db_err:
+            logger.error(f"{log_prefix} Failed to fetch last N messages: {db_err}", exc_info=True)
+            return
 
+        # 3. Формирование КОНТЕКСТА С ИМЕНАМИ для промпта
+        context_log_entries = [] # Список строк "Имя: Текст" или описаний
+        if last_n_messages:
+            logger.debug(f"{log_prefix} Filtering {len(last_n_messages)} records for prompt context log...")
+            try:
+                for m in last_n_messages:
+                    if not isinstance(m, dict): continue # Пропускаем некорректные записи
+
+                    username = m.get('username', 'Неизвестный') # Получаем имя
+                    msg_type = m.get('type')
+                    content = m.get('content', '')
+
+                    log_line = ""
+                    if msg_type == 'text' and content:
+                        # Ограничиваем длину текста для промпта
+                        text_preview = content[:100].strip() + ('...' if len(content) > 100 else '')
+                        log_line = f"{username}: {text_preview}"
+                    elif msg_type == 'photo':
+                        caption_preview = (': ' + content[:50].strip() + ('...' if len(content) > 50 else '')) if content else ''
+                        log_line = f"{username}: [отправил(а) фото]{caption_preview}"
+                    elif msg_type == 'sticker':
+                         emoji = f" ({content})" if content else ""
+                         log_line = f"{username}: [отправил(а) стикер]{emoji}"
+                    # Можно добавить другие типы по аналогии, если считаете важным для контекста вмешательств
+                    # else:
+                    #     log_line = f"{username}: [отправил(а) сообщение типа {msg_type}]"
+
+                    if log_line:
+                        context_log_entries.append(log_line)
+                        # logger.debug(f"{log_prefix} Added log entry: '{log_line}'") # Можно раскомментировать для детального лога
+
+                logger.info(f"{log_prefix} Created {len(context_log_entries)} log entries for prompt.")
+            except Exception as filter_err:
+                logger.error(f"{log_prefix} Error during message filtering loop for context log: {filter_err}", exc_info=True)
+                return # Ошибка при подготовке контекста
+
+        # Лог для проверки передаваемого списка
+        logger.debug(f"{log_prefix} -----> context_log_entries list BEFORE prompt build: {context_log_entries}")
+
+        if not context_log_entries:
+            logger.debug(f"{log_prefix} context_log_entries list is empty after filtering, skipping prompt generation.")
+            return
+
+        # 4. Построение промпта (теперь передаем список строк с именами)
+        intervention_prompt_string = None
+        try:
+            intervention_prompt_string = pb.build_intervention_prompt(context_log_entries, personality)
+            if intervention_prompt_string:
+                 logger.debug(f"{log_prefix} Intervention prompt built (length: {len(intervention_prompt_string)}).")
+            else:
+                 logger.warning(f"{log_prefix} Prompt builder returned None/empty string.")
+                 return
         except Exception as build_err:
             logger.error(f"{log_prefix} Error building intervention prompt: {build_err}", exc_info=True)
             return
 
-        # Проверка на всякий случай, если build_intervention_prompt вернул пустую строку
         if not intervention_prompt_string:
              logger.error(f"{log_prefix} Intervention prompt is unexpectedly empty after build attempt.")
              return
 
-        # ЛОГ 3: Логгируем начало промпта для сверки (это уже было в gemini_client, но можно и здесь для полноты)
-        logger.debug(f"{log_prefix} Generated prompt (first 300 chars): {intervention_prompt_string[:300]}...")
+        logger.debug(f"{log_prefix} Generated prompt sample: {intervention_prompt_string[:200]}...")
 
-        # 6. Вызов Gemini
+        # 5. Вызов Gemini (используем safe_generate_intervention, который теперь принимает строку промпта)
         intervention_text = await gc.safe_generate_intervention(intervention_prompt_string, lang)
 
-        # 7. Обработка ответа и отправка
+        # 6. Обработка ответа и отправка (без изменений)
         if intervention_text:
-            # Повторная проверка кулдауна перед отправкой
             inter_settings_recheck = dm.get_intervention_settings(chat_id)
             now_ts = int(time.time())
             last_ts = inter_settings_recheck.get('last_intervention_ts', 0)
-            # Используем get() для безопасного получения значения (оно должно быть из get_intervention_settings, но на всякий случай)
             cd_minutes = inter_settings_recheck.get('cooldown_minutes', INTERVENTION_DEFAULT_COOLDOWN_MIN)
             cd_sec = cd_minutes * 60
 
@@ -1000,23 +1004,18 @@ async def _try_send_intervention(chat_id: int, context: ContextTypes.DEFAULT_TYP
                 logger.info(f"{log_prefix} Sending '{intervention_text[:50]}...' (Personality: {personality})")
                 try:
                     await context.bot.send_message(chat_id=chat_id, text=intervention_text)
-                    # Обновляем метку ТОЛЬКО после успешной отправки
                     dm.update_chat_setting(chat_id, 'last_intervention_ts', now_ts)
                     logger.info(f"{log_prefix} Timestamp updated to {now_ts}")
                 except TelegramError as send_err:
                      logger.error(f"{log_prefix} Failed to send intervention message: {send_err}")
-                     # Не обновляем timestamp, если отправка не удалась
                 except Exception as send_generic_err:
                      logger.error(f"{log_prefix} Unexpected error sending intervention message: {send_generic_err}", exc_info=True)
-                     # Не обновляем timestamp
             else:
                 logger.info(f"{log_prefix} Cooldown activated during generation ({now_ts} < {last_ts + cd_sec}), skipped sending.")
         else:
-            # safe_generate_intervention уже залогировал причину (ошибку или пустой ответ ИИ)
             logger.debug(f"{log_prefix} No intervention text generated by AI.")
 
     except Exception as e:
-        # Ловим любые другие ошибки на верхнем уровне задачи
         logger.error(f"CRITICAL Error in intervention task main try block for chat c={chat_id}: {e}", exc_info=True)
 
 

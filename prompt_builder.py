@@ -8,7 +8,7 @@ from typing import List, Dict, Union, Optional, Any
 
 # Импортируем необходимые константы и словари из конфига
 from config import (
-    SUPPORTED_GENRES, SUPPORTED_PERSONALITIES, DEFAULT_PERSONALITY,
+    INTERVENTION_PROMPT_MESSAGE_COUNT, SUPPORTED_GENRES, SUPPORTED_PERSONALITIES, DEFAULT_PERSONALITY,
     DEFAULT_OUTPUT_FORMAT, INTERVENTION_CONTEXT_HOURS
 )
 
@@ -287,70 +287,63 @@ def build_summary_content(messages: List[Dict[str, Any]]) -> Optional[PreparedCo
 # Сборка Контента для Вмешательств
 # ================================================
 def build_intervention_prompt(
-    messages_texts_in_context_window: List[str], # Принимаем правильный список строк
+    context_log_entries: List[str], # Список строк вида "Имя: Текст" или описаний
     personality_key: str = DEFAULT_PERSONALITY
 ) -> Optional[str]:
     """
     Генерирует промпт для комментария-вмешательства, используя
-    контекст за последние N часов, но фокусируясь на недавних сообщениях.
+    контекст последних N сообщений с именами авторов, с акцентом на гибкость и стиль.
     """
-    logger.debug(f"Building intervention prompt. Received {len(messages_texts_in_context_window)} texts.")
+    logger.debug(f"Building flexible intervention prompt. Received {len(context_log_entries)} log entries.")
 
-    if not messages_texts_in_context_window:
+    if not context_log_entries:
         logger.debug("build_intervention_prompt received empty list, returning None.")
         return None
 
-    # Определяем инструкцию по личности
+    # --- Инструкция по Личности (Сарказм можно сделать острее) ---
     personality_instruction = ""
     if personality_key == 'wise':
         personality_instruction = "Ты Мудрый Старец, наблюдающий за беседой."
     elif personality_key == 'sarcastic':
-        personality_instruction = "Ты Саркастичный Наблюдатель с тонким чувством иронии."
+        # Разрешаем больше остроты, но фокусируем на ситуации, а не личностях
+        personality_instruction = "Ты Саркастичный Наблюдатель. Твой юмор может быть черным, ирония - едкой. Комментируй абсурдность ситуации, общие паттерны поведения, но старайся не переходить на личности без веской причины в контексте."
     elif personality_key == 'poet':
-        personality_instruction = "Ты Поэт-Романтик, видящий красоту и метафоры в общении."
+        personality_instruction = "Ты Поэт-Романтик, видящий метафоры в общении."
     else: # neutral
         personality_instruction = "Ты Нейтральный Наблюдатель, следящий за ходом дискуссии."
 
     # --- Формируем строку контекста ---
-    context_log_str = ""
-    try:
-        # Используем простой цикл для надежности
-        temp_list = []
-        for text in messages_texts_in_context_window:
-            temp_list.append(f"- {text.strip()}") # Добавляем в список с префиксом
-        context_log_str = "\n".join(temp_list) # Объединяем строки с переносами
+    # (Оставляем как в предыдущем варианте - объединение готовых строк)
+    context_log_str = "\n".join(context_log_entries)
+    logger.debug(f"build_intervention_prompt: Using context log string: '{context_log_str[:150]}...'")
 
-        # Логгируем результат (можно оставить DEBUG или убрать)
-        logger.debug(f"build_intervention_prompt: Final context_log_str: '{context_log_str[:100]}...'")
-
-    except Exception as e:
-        logger.error(f"Error building context log string: {e}", exc_info=True)
-        return None # Ошибка при форматировании
-
-    # Проверяем на всякий случай, что строка не пустая, если были входные данные
-    if not context_log_str and messages_texts_in_context_window:
-        logger.error("context_log_str is empty after formatting loop despite non-empty input.")
+    if not context_log_str and context_log_entries:
+        logger.error("context_log_str is empty after join despite non-empty input.")
         return None
 
-    # --- СОБИРАЕМ ФИНАЛЬНЫЙ ПРОМПТ ---
+    # --- СОБИРАЕМ ОБНОВЛЕННЫЙ ПРОМПТ ---
     prompt = (
-    f"{personality_instruction}\n\n"
-    f"Проанализируй текстовые сообщения из группового чата за последние ~{INTERVENTION_CONTEXT_HOURS} часов, представленные ниже. "
-    f"Они показывают общий контекст разговора.\n\n"
-    f"КОНТЕКСТ ЧАТА ({INTERVENTION_CONTEXT_HOURS}ч):\n"
-    f"---------------------------------\n"
-    f"{context_log_str}\n"
-    f"---------------------------------\n\n"
-    f"**Твоя задача:** Сосредоточься на **САМЫХ ПОСЛЕДНИХ СООБЩЕНИЯХ** в этом контексте. "
-    f"Напиши **уместный и естественный комментарий** (несколько предложений в зависимости от обсуждений), который бы органично вписался в **текущий** ход беседы, как будто ты участник чата. "
-    f"Твой ответ должен отражать твою личность.\n\n"
-    f"**ПРАВИЛА:**\n"
-    f"1.  Комментарий не должен быть громоздким.\n"
-    f"2.  Реагируй на **недавнюю** тему или событие.\n"
-    f"3.  Можешь выразить мнение, задать вопрос или просто отреагировать **в соответствии со своей личностью**.\n"
-    f"4.  **БЕЗ MARKDOWN** или форматирования.\n"
-    f"5.  **НЕ повторяй** фразы из сообщений дословно.\n\n"
-    f"Напиши свой комментарий:"
+        f"{personality_instruction}\n\n"
+        f"Ты находишься в групповом чате. Ниже представлен **лог последних ~{INTERVENTION_PROMPT_MESSAGE_COUNT} сообщений** с указанием имен отправителей:\n\n"
+        f"ЛОГ ПОСЛЕДНИХ СООБЩЕНИЙ:\n"
+        f"---------------------------------\n"
+        f"{context_log_str}\n"
+        f"---------------------------------\n\n"
+        f"**ТВОЯ ЗАДАЧА:**\n"
+        f"Прочитай лог и напиши **небольшой, уместный комментарий (несколько  коротких предложения или слов)**, который отражает твою личность ({personality_instruction}) и органично вписывается в **недавний** ход беседы. Твоя реплика должна выглядеть как естественное замечание участника чата.\n\n"
+
+        f"**РЕКОМЕНДАЦИИ И ПРАВИЛА:**\n"
+        f"1.  **РЕАГИРУЙ НА НЕДАВНЮЮ АКТИВНОСТЬ:** Твой комментарий должен быть связан с тем, что обсуждалось **недавно** в логе.\n"
+        f"2.  **ИЗБЕГАЙ ШАБЛОННОСТИ:** Старайся не начинать свои реплики одинаково или слишком предсказуемо. Будь разнообразнее!\n"
+        f"3.  **БУДЬ ЛАКОНИЧНЫМ:** Не пиши длинных трактатов. Твоя роль - короткое вмешательство.\n"
+        f"4.  **БЕЗ MARKDOWN:** Пиши обычным текстом.\n"
+        f"5.  **НЕ ПОВТОРЯЙ ДОСЛОВНО:** Перефразируй, реагируй, комментируй, но не копируй текст из лога.\n"
+        f"6.  **БУДЬ СОБОЙ:** Действуй в соответствии со своей личностью. Если ты саркастичный - будь острым, если мудрый - вдумчивым, если поэт - образным.\n"
+        f"7.  **НЕ ПРЕДСТАВЛЯЙСЯ:** Не пиши от имени бота или наблюдателя.\n"
+        f"8.  **ТОЛЬКО КОММЕНТАРИЙ:** Твой ответ должен содержать ТОЛЬКО текст твоего комментария, без каких-либо предисловий или объяснений.\n\n"
+
+        f"Напиши свой **один короткий и уместный** комментарий, основываясь на **недавних** сообщениях и своей личности:\n"
+        # Пустая строка ниже важна
     )
 
     return prompt

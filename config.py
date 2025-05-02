@@ -16,7 +16,7 @@ CLOUDFLARE_WORKER_URL = os.getenv("CLOUDFLARE_WORKER_URL")
 CLOUDFLARE_AUTH_TOKEN = os.getenv("CLOUDFLARE_AUTH_TOKEN")
 
 
-INTERVENTION_CONTEXT_HOURS = int(os.getenv("INTERVENTION_CONTEXT_HOURS", "24"))
+INTERVENTION_CONTEXT_HOURS = int(os.getenv("INTERVENTION_CONTEXT_HOURS", "1"))
 # --- ID владельца бота (для уведомлений об ошибках и статуса) ---
 # !!! ВАЖНО: Установите ваш реальный Telegram User ID !!!
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0"))
