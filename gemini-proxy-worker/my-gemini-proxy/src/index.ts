@@ -142,7 +142,7 @@ export default {
         }
 
         // 5. Вызываем Google Gemini API с помощью fetchWithRetry
-        const modelName = 'gemini-1.5-flash-latest'; // Модель, поддерживающая Vision
+        const modelName = 'gemini-2.5-flash-preview-04-17'; 
         const googleApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${env.GEMINI_API_KEY}`;
         const requestStartTime = Date.now();
         console.log(`Sending request to Gemini API (${modelName})...`);
