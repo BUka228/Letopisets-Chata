@@ -308,3 +308,45 @@ async def safe_generate_intervention(
     except (RetryError, ValueError, Exception) as e:
         logger.warning(f"Exception during intervention generation after retries: {e.__class__.__name__}: {e}", exc_info=(not isinstance(e, RetryError)))
         return None
+    
+    
+    
+async def safe_generate_reply_to_intervention(
+    reply_prompt_string: Optional[str],
+    lang: str = DEFAULT_LANGUAGE # lang может быть полезен для get_user_friendly_proxy_error
+) -> Optional[str]:
+    """
+    Генерирует ответ на ответ пользователя на вмешательство.
+    Использует настройки, аналогичные обычному вмешательству.
+    Возвращает сгенерированный текст или None в случае ошибки.
+    """
+    if not reply_prompt_string:
+        logger.debug("safe_generate_reply_to_intervention received empty prompt string.")
+        return None
+
+    # Промпт уже является строкой, оборачиваем его в список для generate_via_proxy
+    prepared_content: PreparedContent = [reply_prompt_string]
+
+    # Используем use_intervention_retry=True для коротких таймаутов и меньшего кол-ва попыток
+    generated_text, error_message = await generate_via_proxy(
+        prepared_content,
+        lang, # Передаем язык для возможной обработки ошибок
+        use_intervention_retry=True
+    )
+
+    if error_message:
+        # Ошибки уже залогированы в generate_via_proxy и _call_proxy
+        logger.warning(f"Error generating reply to intervention (lang: {lang}): {error_message}")
+        return None # Не возвращаем user-friendly ошибку, просто None
+    
+    if generated_text:
+        # Проверяем специальный токен, если ИИ решил, что ответ не нужен
+        if generated_text.strip().upper() == "[NO_REPLY_NEEDED]":
+            logger.info("Gemini indicated no reply needed for intervention chain.")
+            return None
+        return generated_text.strip()
+    else:
+        # Это случай, когда generate_via_proxy вернул (None, None) - маловероятно без ошибки,
+        # или (пустая_строка, None)
+        logger.warning("Reply to intervention AI returned empty/None response text without explicit error.")
+        return None

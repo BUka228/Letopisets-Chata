@@ -347,3 +347,69 @@ def build_intervention_prompt(
     )
 
     return prompt
+
+
+def build_reply_to_intervention_prompt(
+    original_bot_text: str,
+    user_reply_text: str,
+    personality_key: str = DEFAULT_PERSONALITY,
+    chat_history_for_context: Optional[List[str]] = None # Задел на будущее
+) -> Optional[str]:
+    """
+    Генерирует промпт для Gemini, чтобы он ответил на реплику пользователя,
+    которая была ответом на предыдущее вмешательство бота.
+    """
+    if not original_bot_text and not user_reply_text: # Если оба пусты, нет смысла
+        logger.debug("Both original bot text and user reply are empty for intervention reply prompt.")
+        return None
+    
+    # Если оригинальный текст бота пуст (маловероятно для вмешательств, но все же)
+    original_bot_text_safe = original_bot_text or "[Предыдущая реплика бота отсутствует или была не текстовой]"
+    user_reply_text_safe = user_reply_text or "[Пользователь не предоставил текстовый ответ]"
+
+
+    personality_instruction = ""
+    if personality_key == 'wise':
+        personality_instruction = "Ты Мудрый Старец, продолжающий вдумчивый диалог."
+    elif personality_key == 'sarcastic':
+        personality_instruction = "Ты Саркастичный Наблюдатель. Ответь пользователю с присущей тебе иронией, но не переходя на личности."
+    elif personality_key == 'poet':
+        personality_instruction = "Ты Поэт-Романтик. Продолжи общение, используя образный язык и сохраняя поэтическую атмосферу."
+    else: # neutral
+        personality_instruction = "Ты Нейтральный Собеседник, поддерживающий конструктивный диалог."
+
+    dialog_context = (
+        f"ТВОЯ ПРЕДЫДУЩАЯ РЕПЛИКА В ЧАТЕ (НА КОТОРУЮ ПОСЛЕДОВАЛ ОТВЕТ):\n"
+        f"```\n{original_bot_text_safe}\n```\n\n"
+        f"ОТВЕТ ПОЛЬЗОВАТЕЛЯ НА ЭТУ ТВОЮ РЕПЛИКУ:\n"
+        f"```\n{user_reply_text_safe}\n```\n"
+    )
+    
+    history_block_str = ""
+    if chat_history_for_context:
+        # Собираем строку history_block_str отдельно, чтобы избежать проблем с f-string
+        history_lines = [
+            "\n\nНЕКОТОРАЯ ПРЕДЫСТОРИЯ ОБСУЖДЕНИЯ В ЧАТЕ (до твоей реплики, для дополнительного контекста):",
+            "---------------------------------",
+            '\n'.join(chat_history_for_context),
+            "---------------------------------"
+        ]
+        history_block_str = '\n'.join(history_lines)
+
+    prompt = (
+        f"{personality_instruction}\n\n"
+        f"Ты недавно оставил(а) комментарий в чате. Пользователь ответил на твой комментарий. Вот ваша короткая переписка:\n\n"
+        f"{dialog_context}"
+        f"{history_block_str}\n"
+        f"**ТВОЯ ЗАДАЧА:**\n"
+        f"Напиши **короткий, естественный и уместный ответ** на сообщение пользователя. Твой ответ должен:\n"
+        f"1.  Продолжать сложившийся микро-диалог, а не начинать новую тему или повторять старое.\n"
+        f"2.  Строго соответствовать твоей личности ({personality_instruction}).\n"
+        f"3.  Быть лаконичным (обычно 1-3 предложения, максимум 40-50 слов).\n"
+        f"4.  Быть написан обычным текстом, **БЕЗ какого-либо Markdown или специального форматирования**.\n"
+        f"5.  **НЕ представляйся** и не пиши от имени бота или ИИ (например, фразы типа 'Как бот, я думаю...' ЗАПРЕЩЕНЫ).\n"
+        f"6.  Твой ответ должен содержать **ТОЛЬКО текст твоего комментария/ответа**, без каких-либо предисловий, объяснений или мета-комментариев о задаче.\n"
+        f"7.  Если ответ пользователя не предполагает развернутой реакции или кажется завершающим, ты можешь ответить очень коротко (например, 'Понятно.', 'Хорошо.', 'Учту.') или даже вернуть специальный токен `[NO_REPLY_NEEDED]` если считаешь, что ответ не требуется или будет неуместен.\n\n"
+        f"Твой ответ на сообщение пользователя:\n"
+    )
+    return prompt

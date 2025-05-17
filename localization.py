@@ -136,7 +136,30 @@ LOCALIZED_TEXTS: Dict[str, Dict[str, str]] = {
         "intervention_state_enabled": "Разрешены",
         "intervention_state_disabled": "Запрещены",
         "settings_interventions_enabled": "✅ Разрешены", # Для главного меню
-        "settings_interventions_disabled": "❌ Запрещены", # Для главного меню
+        "settings_intervention_manual_button": "✏️ Ввести",
+        "settings_intervention_manual_input_hint": "Кнопка '✏️ Ввести' позволяет задать точное значение (только для владельца).",
+        
+        # Старые ключи (оставить для обычных админов, если вдруг решат им дать ввод с лимитами)
+        "settings_intervention_manual_prompt_cooldown": "Введите новый интервал (в минутах, от {min_val} до {max_val}):",
+        "settings_intervention_manual_prompt_minmsgs": "Введите новое мин. кол-во сообщений (от {min_val} до {max_val}):",
+        "settings_intervention_manual_prompt_timespan": "Введите новое окно активности (в минутах, от {min_val} до {max_val}):",
+
+        # НОВЫЕ КЛЮЧИ для владельца (без min/max в тексте)
+        "settings_intervention_manual_prompt_owner_cooldown": "Введите новый интервал (в минутах, например, 10):",
+        "settings_intervention_manual_prompt_owner_minmsgs": "Введите новое мин. кол-во сообщений (например, 3):",
+        "settings_intervention_manual_prompt_owner_timespan": "Введите новое окно активности (в минутах, например, 5):",
+        "settings_intervention_manual_prompt_cooldown_base": "Введите новый интервал (в минутах):", # Fallback без {min_val}
+        "settings_intervention_manual_prompt_minmsgs_base": "Введите новое мин. кол-во сообщений:", # Fallback
+        "settings_intervention_manual_prompt_timespan_base": "Введите новое окно активности (в минутах):", # Fallback
+
+        "error_intervention_manual_not_number": "❌ Введите, пожалуйста, целое число.",
+        "error_intervention_manual_positive_only": "❌ Значение для '{setting_name}' должно быть положительным числом.", # Новая строка
+        "settings_intervention_manual_set": "✅ Значение успешно установлено: {value}.", # Для обычных админов (если будет)
+        "settings_intervention_manual_set_owner": "✅ Владелец установил значение: {value}.", # Новая строка для владельца
+
+        "setting_name_cooldown": "Интервал", # Для error_intervention_manual_positive_only
+        "setting_name_minmsgs": "Мин. сообщения",
+        "setting_name_timespan": "Окно активности",
 
         # Подменю Языка
         "settings_select_language_title": "🌐 Выберите язык:",
@@ -344,6 +367,29 @@ Analyzing chat, creating unique summaries.
         "settings_intervention_btn_cooldown": "{minutes} min",
         "settings_intervention_btn_msgs": "{count} msgs",
         "settings_intervention_btn_timespan": "{minutes} min",
+        
+        "settings_intervention_manual_button": "✏️ Enter",
+        "settings_intervention_manual_input_hint": "Button '✏️ Enter' allows to set an exact value (owner only).",
+
+        "settings_intervention_manual_prompt_cooldown": "Enter new cooldown (minutes, {min_val}-{max_val}):",
+        "settings_intervention_manual_prompt_minmsgs": "Enter new min messages ({min_val}-{max_val}):",
+        "settings_intervention_manual_prompt_timespan": "Enter new activity window (minutes, {min_val}-{max_val}):",
+        
+        "settings_intervention_manual_prompt_owner_cooldown": "Enter new cooldown (minutes, e.g., 10):",
+        "settings_intervention_manual_prompt_owner_minmsgs": "Enter new min messages (e.g., 3):",
+        "settings_intervention_manual_prompt_owner_timespan": "Enter new activity window (minutes, e.g., 5):",
+        "settings_intervention_manual_prompt_cooldown_base": "Enter new cooldown (minutes):",
+        "settings_intervention_manual_prompt_minmsgs_base": "Enter new min messages:",
+        "settings_intervention_manual_prompt_timespan_base": "Enter new activity window (minutes):",
+
+        "error_intervention_manual_not_number": "❌ Please enter an integer.",
+        "error_intervention_manual_positive_only": "❌ Value for '{setting_name}' must be a positive number.", # New string
+        "settings_intervention_manual_set": "✅ Value successfully set: {value}.",
+        "settings_intervention_manual_set_owner": "✅ Owner set value: {value}.", # New string for owner
+
+        "setting_name_cooldown": "Cooldown",
+        "setting_name_minmsgs": "Min messages",
+        "setting_name_timespan": "Timespan",
 
         # Names for localization
         "genre_name_default": "Standard", "genre_name_humor": "Humorous", "genre_name_detective": "Detective", "genre_name_fantasy": "Fantasy", "genre_name_news_report": "News Report",
@@ -476,7 +522,12 @@ def format_retention_days(days: Optional[int], lang: str) -> str:
 
 def get_intervention_value_limits(setting_key: str) -> Tuple[int, int, int]:
     """Возвращает кортеж (min, max, default) для настройки вмешательства."""
-    if setting_key == 'intervention_cooldown_minutes': return (INTERVENTION_MIN_COOLDOWN_MIN, INTERVENTION_MAX_COOLDOWN_MIN, INTERVENTION_DEFAULT_COOLDOWN_MIN)
-    elif setting_key == 'intervention_min_msgs': return (INTERVENTION_MIN_MIN_MSGS, INTERVENTION_MAX_MIN_MSGS, INTERVENTION_DEFAULT_MIN_MSGS)
-    elif setting_key == 'intervention_timespan_minutes': return (INTERVENTION_MIN_TIMESPAN_MIN, INTERVENTION_MAX_TIMESPAN_MIN, INTERVENTION_DEFAULT_TIMESPAN_MIN)
-    else: return (0, 99999, 0) # Fallback
+    if setting_key == 'intervention_cooldown_minutes': 
+        return (INTERVENTION_MIN_COOLDOWN_MIN, INTERVENTION_MAX_COOLDOWN_MIN, INTERVENTION_DEFAULT_COOLDOWN_MIN)
+    elif setting_key == 'intervention_min_msgs': 
+        return (INTERVENTION_MIN_MIN_MSGS, INTERVENTION_MAX_MIN_MSGS, INTERVENTION_DEFAULT_MIN_MSGS)
+    elif setting_key == 'intervention_timespan_minutes': 
+        return (INTERVENTION_MIN_TIMESPAN_MIN, INTERVENTION_MAX_TIMESPAN_MIN, INTERVENTION_DEFAULT_TIMESPAN_MIN)
+    else: 
+        logger.warning(f"Unknown setting_key '{setting_key}' for intervention limits.")
+        return (0, 99999, 0) # Fallback, не должен использоваться при правильных ключах

@@ -30,7 +30,7 @@ from config import (
      INTERVENTION_CONTEXT_HOURS
 )
 from localization import (
-    get_text, get_chat_lang, update_chat_lang_cache, get_genre_name,
+    get_intervention_value_limits, get_text, get_chat_lang, update_chat_lang_cache, get_genre_name,
     get_personality_name, get_output_format_name, format_retention_days,
     get_user_friendly_proxy_error, get_stats_period_name, LOCALIZED_TEXTS
 )
@@ -48,11 +48,14 @@ from telegram.ext import (
 from telegram.constants import ParseMode, ChatAction, ChatType
 from telegram.error import TelegramError, BadRequest
 from telegram.helpers import escape_markdown # Только escape_markdown
+from telegram.constants import ParseMode, ChatAction, ChatType
 
 logger = logging.getLogger(__name__)
 
 # Ключ для ожидания ввода времени
 PENDING_TIME_INPUT_KEY = 'pending_time_input_for_msg'
+PENDING_INTERVENTION_INPUT_KEY = 'pending_intervention_setting_input_details' 
+ACTIVE_INTERVENTION_CHAIN_MESSAGE_ID_KEY = 'active_intervention_chain_message_id'
 
 # =======================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ОБРАБОТЧИКОВ
@@ -400,21 +403,25 @@ async def story_settings_command(update: Update, context: ContextTypes.DEFAULT_T
 async def settings_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Единый обработчик ВСЕХ кнопок меню настроек (с префиксом 'settings_').
-    Маршрутизирует вызовы к соответствующим функциям отображения
-    или напрямую обновляет настройки.
+    Маршрутизирует вызовы к соответствующим функциям отображения,
+    напрямую обновляет настройки, или инициирует ручной ввод для владельца.
     """
     query = update.callback_query
     if not query or not query.message: return
     await query.answer() # Ответ на колбек обязателен
 
-    user = query.from_user; chat = query.message.chat
-    if not user or not chat: return # Необходимы пользователь и чат
-    chat_id = chat.id; user_id = user.id; message_id = query.message.message_id
-    data = query.data; chat_lang = await get_chat_lang(chat_id)
+    user = query.from_user
+    chat = query.message.chat
+    if not user or not chat: return 
+    chat_id = chat.id
+    user_id = user.id
+    message_id = query.message.message_id
+    data = query.data
+    chat_lang = await get_chat_lang(chat_id)
     logger.info(f"Settings CB: user={user_id} chat={chat_id} data='{data}' msg={message_id}")
 
-    # Проверка прав администратора перед любыми действиями
-    if not await is_user_admin(chat_id, user_id, context):
+    # Проверка прав администратора перед любыми действиями (кроме 'settings_close')
+    if data != 'settings_close' and not await is_user_admin(chat_id, user_id, context):
         await query.answer(get_text("admin_only", chat_lang), show_alert=True)
         return
 
@@ -425,15 +432,17 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
 
         # --- Навигация и базовые переключатели ---
         if data == 'settings_main':
-            context.user_data.pop(PENDING_TIME_INPUT_KEY, None) # Сброс ожидания ввода времени
+            context.user_data.pop(PENDING_TIME_INPUT_KEY, None) 
+            context.user_data.pop(PENDING_INTERVENTION_INPUT_KEY, None) # Сброс ожидания ввода для вмешательств
             await _display_settings_main(update, context, chat_id, user_id)
         elif data == 'settings_close':
             context.user_data.pop(PENDING_TIME_INPUT_KEY, None)
+            context.user_data.pop(PENDING_INTERVENTION_INPUT_KEY, None)
             try:
-                await query.delete_message() # Удаляем сообщение настроек
+                await query.delete_message() 
             except (BadRequest, TelegramError) as e:
                  logger.warning(f"Failed to delete settings message on close: {e}")
-        elif data == 'settings_toggle_status': # Вкл/выкл бота для чата
+        elif data == 'settings_toggle_status': 
              settings=dm.get_chat_settings(chat_id)
              success=dm.update_chat_setting(chat_id,'enabled', not settings.get('enabled',True))
              if success:
@@ -449,38 +458,87 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         elif data == 'settings_show_personality': await _display_settings_personality(update, context, chat_id, user_id)
         elif data == 'settings_show_format': await _display_settings_output_format(update, context, chat_id, user_id)
         elif data == 'settings_show_retention': await _display_settings_retention(update, context, chat_id, user_id)
-        elif data == 'settings_toggle_interventions': # Вкл/выкл вмешательств (из главного меню или из подменю)
+        
+        # Вмешательства
+        elif data == 'settings_toggle_interventions':
              settings=dm.get_chat_settings(chat_id)
              new_state = not settings.get('allow_interventions',False)
              success=dm.update_chat_setting(chat_id,'allow_interventions', new_state)
              if success:
-                 await _display_settings_main(update,context,chat_id,user_id) # Всегда возвращаемся в главное
+                 # Если отключаем вмешательства, то и настройки вмешательств не показываем, а идем в главное меню
+                 await _display_settings_main(update,context,chat_id,user_id)
                  await query.answer(get_text("settings_saved_popup",chat_lang))
              else: await query.answer(get_text("error_db_generic",chat_lang),show_alert=True)
-        elif data == 'settings_show_interventions': # Показать настройки вмешательств
+        
+        elif data == 'settings_show_interventions': # Показать настройки вмешательств (главная кнопка или после изменения toggle)
             await _display_settings_interventions(update, context, chat_id, user_id)
 
+        # --- Ручной ввод настроек Вмешательств (Только Владелец) ---
+        elif data.startswith('settings_manual_') and user_id == BOT_OWNER_ID:
+            setting_type_to_input = data.split('_')[-1] # cooldown, minmsgs, timespan
+            db_key_map = {
+                'cooldown': 'intervention_cooldown_minutes',
+                'minmsgs': 'intervention_min_msgs',
+                'timespan': 'intervention_timespan_minutes'
+            }
+            if setting_type_to_input not in db_key_map:
+                logger.warning(f"Invalid manual input type: {setting_type_to_input} from callback {data}")
+                await query.answer("Ошибка: неизвестный тип параметра для ввода.", show_alert=True)
+                return
+
+            # Сохраняем ID сообщения с меню и тип ожидаемого ввода
+            context.user_data[PENDING_INTERVENTION_INPUT_KEY] = {
+                'type': db_key_map[setting_type_to_input],
+                'menu_message_id': query.message.message_id,
+                'chat_id_for_menu': chat_id 
+            }
+            
+            prompt_text_key = f"settings_intervention_manual_prompt_{setting_type_to_input}"
+            min_val, max_val, _ = (0,0,0) # Инициализация
+            if setting_type_to_input == 'cooldown': limits_tuple = get_intervention_value_limits('intervention_cooldown_minutes')
+            elif setting_type_to_input == 'minmsgs': limits_tuple = get_intervention_value_limits('intervention_min_msgs')
+            elif setting_type_to_input == 'timespan': limits_tuple = get_intervention_value_limits('intervention_timespan_minutes')
+            else: limits_tuple = (0,0,0) 
+            min_val, max_val = limits_tuple[0], limits_tuple[1]
+
+            prompt_text = get_text(prompt_text_key, chat_lang, min_val=min_val, max_val=max_val)
+            
+            await query.answer(prompt_text, show_alert=True) 
+            logger.info(f"Owner {user_id} in chat {chat_id} (menu_msg_id {query.message.message_id}) requested manual input for {db_key_map[setting_type_to_input]}. Waiting...")
+
+
         # =============================================
-        # == Обработка УСТАНОВКИ ЗНАЧЕНИЙ ==============
+        # == Обработка УСТАНОВКИ ЗНАЧЕНИЙ через кнопки ==
         # =============================================
         elif data.startswith('settings_set_'):
             parts = data.split('_')
-            if len(parts) < 4: logger.warning(f"Invalid set CB format: {data}"); return
+            # Формат 'settings_set_TYPE_VALUE' или 'settings_set_TYPE_SUBTYPE_VALUE'
+            # Минимальное количество частей - 4 (settings_set_type_value)
+            if len(parts) < 4: 
+                logger.warning(f"Invalid set CB format (too few parts): {data}")
+                return
 
-            setting_type = parts[2]
-            value_str = parts[-1] # Последняя часть как значение (кроме TZ)
-            db_key = "" # Ключ для БД
-            db_value: Any = None # Значение для БД
-            popup_message = get_text("settings_saved_popup", chat_lang) # Сообщение об успехе по умолч.
-            needs_display_main = True # Флаг, нужно ли перерисовывать главное меню
-            alert_on_error = True # Показывать ли алерт при ошибке БД
-            was_corrected = False # Флаг коррекции для настроек вмешательств
+            setting_type = parts[2] # lang, tz, genre, personality, format, retention, time, cooldown, minmsgs, timespan
+            
+            # Для таймзоны значение может содержать '_'
+            if setting_type == 'tz':
+                value_str = '_'.join(parts[3:])
+            else:
+                value_str = parts[-1] # Последняя часть как значение для большинства
+
+            db_key = "" 
+            db_value: Any = None 
+            popup_message = get_text("settings_saved_popup", chat_lang) 
+            needs_display_main = True 
+            alert_on_error = True 
+            was_corrected = False
+            limits_tuple_for_correction = (0,0,0) # Для сообщения о коррекции (min, max, default)
 
             # Определяем ключ БД и значение в зависимости от типа
             if setting_type == 'lang' and value_str in SUPPORTED_LANGUAGES:
                  db_key = 'lang'; db_value = value_str; popup_message = get_text("settings_lang_selected", value_str)
-            elif setting_type == 'tz': # Таймзона может содержать '_'
-                 db_key = 'timezone'; db_value = '_'.join(parts[3:])
+            elif setting_type == 'tz': # Обрабатывается выше для value_str
+                 db_key = 'timezone'; db_value = value_str
                  if db_value not in COMMON_TIMEZONES: logger.warning(f"Invalid TZ value: {db_value}"); return
                  popup_message = get_text("settings_tz_selected", chat_lang)
             elif setting_type == 'genre' and value_str in SUPPORTED_GENRES:
@@ -492,79 +550,85 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
             elif setting_type == 'retention':
                  db_key = 'retention_days'; db_value = None if value_str == 'inf' else int(value_str)
                  popup_message = get_text("settings_retention_selected", chat_lang)
-            elif setting_type == 'time' and value_str == 'default': # Кнопка сброса времени
+            elif setting_type == 'time' and value_str == 'default': 
                  db_key = 'custom_schedule_time'; db_value = None
-                 # Сообщение об успехе можно сделать специфичным
-                 # popup_message = get_text("settings_time_reset_success", chat_lang, ...)
-            # --- Обработка НАСТРОЕК ВМЕШАТЕЛЬСТВ ---
+                 # Можно сделать сообщение о сбросе времени специфичным
+                 # popup_message = get_text("settings_time_reset_success_specific", chat_lang) 
+            
+            # Настройки Вмешательств (только через кнопки, не ручной ввод)
             elif setting_type == 'cooldown':
                  db_key = 'intervention_cooldown_minutes'
-                 limits = (INTERVENTION_MIN_COOLDOWN_MIN, INTERVENTION_MAX_COOLDOWN_MIN)
-                 val_int = int(value_str); db_value = max(limits[0], min(val_int, limits[1]))
+                 limits_tuple_for_correction = get_intervention_value_limits(db_key)
+                 val_int = int(value_str); db_value = max(limits_tuple_for_correction[0], min(val_int, limits_tuple_for_correction[1]))
                  if db_value != val_int: was_corrected = True
                  needs_display_main = False # Остаемся в подменю вмешательств
                  popup_message = get_text("settings_interventions_saved_popup", chat_lang)
             elif setting_type == 'minmsgs':
                  db_key = 'intervention_min_msgs'
-                 limits = (INTERVENTION_MIN_MIN_MSGS, INTERVENTION_MAX_MIN_MSGS)
-                 val_int = int(value_str); db_value = max(limits[0], min(val_int, limits[1]))
+                 limits_tuple_for_correction = get_intervention_value_limits(db_key)
+                 val_int = int(value_str); db_value = max(limits_tuple_for_correction[0], min(val_int, limits_tuple_for_correction[1]))
                  if db_value != val_int: was_corrected = True
                  needs_display_main = False
                  popup_message = get_text("settings_interventions_saved_popup", chat_lang)
             elif setting_type == 'timespan':
                  db_key = 'intervention_timespan_minutes'
-                 limits = (INTERVENTION_MIN_TIMESPAN_MIN, INTERVENTION_MAX_TIMESPAN_MIN)
-                 val_int = int(value_str); db_value = max(limits[0], min(val_int, limits[1]))
+                 limits_tuple_for_correction = get_intervention_value_limits(db_key)
+                 val_int = int(value_str); db_value = max(limits_tuple_for_correction[0], min(val_int, limits_tuple_for_correction[1]))
                  if db_value != val_int: was_corrected = True
                  needs_display_main = False
                  popup_message = get_text("settings_interventions_saved_popup", chat_lang)
-            # ----------------------------------------
-            else: logger.warning(f"Unhandled setting type/value: {data}"); return # Неизвестная настройка
+            
+            else: 
+                logger.warning(f"Unhandled 'settings_set_' type/value in callback: {data}")
+                return 
 
             # Сохранение в БД
-            if db_key: # Убедимся, что ключ определен
+            if db_key: 
                 success = dm.update_chat_setting(chat_id, db_key, db_value)
                 if success:
-                    # Дополнительные действия после сохранения
                     if db_key == 'lang' and isinstance(db_value, str):
                         update_chat_lang_cache(chat_id, db_value)
-                        # await _update_bot_commands(...) # Раскомментировать, если нужно менять команды при смене языка
+                        # Здесь можно обновить команды бота, если они зависят от языка
+                        # await _update_bot_commands_for_chat(context.bot, chat_id, db_value)
 
                     # Перерисовываем меню и показываем уведомление
                     if needs_display_main:
                         await _display_settings_main(update, context, chat_id, user_id)
-                    else: # Перерисовываем подменю вмешательств
+                    else: 
                         await _display_settings_interventions(update, context, chat_id, user_id)
 
-                    # Показываем попап об успехе или коррекции
                     if was_corrected:
-                        corrected_popup = get_text("error_value_corrected", chat_lang, min_val=limits[0], max_val=limits[1]).format(value=db_value)
-                        await query.answer(corrected_popup, show_alert=True)
+                        corrected_popup_text = get_text("error_value_corrected", chat_lang, 
+                                                        corrected_value=db_value, 
+                                                        min_val=limits_tuple_for_correction[0], 
+                                                        max_val=limits_tuple_for_correction[1])
+                        await query.answer(corrected_popup_text, show_alert=True)
                     else:
                         await query.answer(popup_message)
-                else: # Ошибка сохранения БД
+                else: 
                     await query.answer(get_text("error_db_generic", chat_lang), show_alert=alert_on_error)
             else:
-                 logger.error(f"DB key was not determined for callback data: {data}") # Ошибка логики
-
-        # --- Кнопка сброса времени (обработана выше в блоке 'settings_set_') ---
-        # elif data == 'settings_set_time_default': # Этот блок больше не нужен здесь
-        #     # ...
+                 logger.error(f"DB key was not determined for callback data: {data}") 
 
         else:
-             logger.warning(f"Unknown settings callback data: {data}")
+             logger.warning(f"Unknown settings callback data prefix or structure: {data}")
 
     except BadRequest as e:
-        # Часто "Message is not modified", игнорируем её или логируем как DEBUG
-        if "Message is not modified" in str(e): logger.debug(f"Settings CB BadRequest (not modified): {e}")
-        else: logger.error(f"BadRequest in settings CB handler: {e}", exc_info=True)
+        if "Message is not modified" in str(e): logger.debug(f"Settings CB BadRequest (not modified): {e} for data {data}")
+        else: logger.error(f"BadRequest in settings CB handler for data {data}: {e}", exc_info=True)
     except TelegramError as e:
-        logger.error(f"TelegramError in settings CB handler: {e}", exc_info=True)
-        await query.answer(get_text("error_telegram", chat_lang, error=e.__class__.__name__), show_alert=True)
+        logger.error(f"TelegramError in settings CB handler for data {data}: {e}", exc_info=True)
+        try:
+            await query.answer(get_text("error_telegram", chat_lang, error=e.__class__.__name__), show_alert=True)
+        except Exception as answer_e: # Если даже ответ на коллбэк не удался
+            logger.error(f"Failed to answer callback query after TelegramError: {answer_e}")
     except Exception as e:
-        logger.exception(f"Unexpected error in settings CB handler: {e}")
-        await query.answer(get_text("error_db_generic", chat_lang), show_alert=True) # Общая ошибка
-        await notify_owner(context=context, message="Critical error in settings_callback_handler", chat_id=chat_id, user_id=user_id, operation="settings_callback", exception=e, important=True)
+        logger.exception(f"Unexpected error in settings CB handler for data {data}: {e}")
+        try:
+            await query.answer(get_text("error_db_generic", chat_lang), show_alert=True) 
+        except Exception as answer_e:
+            logger.error(f"Failed to answer callback query after unexpected error: {answer_e}")
+        await notify_owner(context=context, message="Critical error in settings_callback_handler", chat_id=chat_id, user_id=user_id, operation=f"settings_callback: {data}", exception=e, important=True)
 
 
 async def feedback_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -724,31 +788,58 @@ async def purge_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
 # ГЛАВНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ
 # ==============================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Сохраняет сообщения из групп И обрабатывает ожидаемый ввод времени в ЛС/группах."""
     message = update.message
     if not message or not message.from_user or message.from_user.is_bot: return
-    chat = message.chat; user = message.from_user
+    chat = message.chat
+    user = message.from_user
     if not chat or not user: return
-    chat_id = chat.id; user_id = user.id
+    chat_id = chat.id
+    user_id = user.id
 
-    # --- Обработка ожидаемого ввода времени ---
-    pending_msg_id = context.user_data.get(PENDING_TIME_INPUT_KEY)
-    if pending_msg_id is not None and message.text and not message.text.startswith('/'):
-        # Убедимся, что сообщение пришло из того же чата, для которого ждем ввод
-        # Это нужно, если бот работает и в ЛС, и в группах одновременно
-        # Обычно ID сообщения уникален глобально, но user_data общая на юзера.
-        # Можно добавить ID чата в ключ user_data: f'pending_time_{chat_id}'
-        # пока оставим как есть для простоты.
-        await _handle_time_input(update, context, chat_id, user_id, pending_msg_id, message)
-        return # Выходим, не сохраняя и не проверяя на вмешательство
+    # --- 1. Обработка ожидаемого ввода ВРЕМЕНИ для настроек ---
+    pending_time_input_msg_id = context.user_data.get(PENDING_TIME_INPUT_KEY)
+    if pending_time_input_msg_id is not None and message.text and not message.text.startswith('/'):
+        await _handle_time_input(update, context, chat_id, user_id, pending_time_input_msg_id, message)
+        return
 
-    # --- Сохранение сообщения (только из групп) ---
+    # --- 2. Обработка ожидаемого ввода НАСТРОЙКИ ВМЕШАТЕЛЬСТВА от владельца ---
+    # PENDING_INTERVENTION_INPUT_KEY хранит {'type': ..., 'menu_message_id': ..., 'chat_id_for_menu': ...}
+    pending_intervention_details = context.user_data.get(PENDING_INTERVENTION_INPUT_KEY)
+    if pending_intervention_details and \
+       user_id == BOT_OWNER_ID and \
+       message.text and \
+       not message.text.startswith('/'):
+        
+        menu_chat_id_for_setting = pending_intervention_details.get('chat_id_for_menu')
+        # Убедимся, что владелец отвечает в том же чате, где было открыто меню,
+        # или в ЛС боту (если это разрешено и chat_id == user_id).
+        # Пока считаем, что владелец должен отвечать в том же чате, где меню.
+        if chat_id == menu_chat_id_for_setting:
+            await _handle_intervention_setting_input(
+                update, context, chat_id, user_id, # chat_id = menu_chat_id_for_setting
+                pending_intervention_details['type'], 
+                pending_intervention_details['menu_message_id'], 
+                message
+            )
+            return 
+
+    # --- 3. Обработка ответа на СООБЩЕНИЕ БОТА (возможно, на вмешательство) ---
+    if message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id:
+        active_intervention_msg_id = context.chat_data.get(ACTIVE_INTERVENTION_CHAIN_MESSAGE_ID_KEY)
+        if active_intervention_msg_id and message.reply_to_message.message_id == active_intervention_msg_id:
+            logger.info(f"User {user_id} in chat {chat_id} replied to an active intervention chain message {active_intervention_msg_id}.")
+            asyncio.create_task(_handle_reply_to_intervention_chain(
+                context, chat_id, message.reply_to_message, message
+            ))
+            # Сообщение пользователя (ответ на вмешательство) НЕ сохраняем в БД и не триггерим на него новое обычное вмешательство.
+            return 
+
+    # --- 4. Сохранение обычного сообщения (только из групп) ---
     if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         timestamp = message.date or datetime.datetime.now(pytz.utc)
         username = user.username or user.first_name or f"User_{user_id}"
-        m_data={'message_id': message.message_id, 'user_id': user_id, 'username': username, 'timestamp': timestamp.isoformat(), 'type': 'unknown', 'content': None,'file_id': None, 'file_unique_id': None, 'file_name': None }
+        m_data = {'message_id': message.message_id, 'user_id': user_id, 'username': username, 'timestamp': timestamp.isoformat(), 'type': 'unknown', 'content': None,'file_id': None, 'file_unique_id': None, 'file_name': None }
         f_info=None; m_type='unknown'
-        # Определение типа и контента (как раньше)
         if message.text: m_type='text'; m_data['content']=message.text
         elif message.sticker: m_type='sticker'; m_data['content']=message.sticker.emoji; f_info=message.sticker
         elif message.photo: m_type='photo'; m_data['content']=message.caption; f_info=message.photo[-1]
@@ -758,15 +849,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif message.video_note: m_type = 'video_note'; f_info = message.video_note
         elif message.document: m_type = 'document'; m_data['content'] = message.caption; f_info = message.document
         elif message.caption: m_type = 'media_with_caption'; m_data['content'] = message.caption
-
         m_data['type'] = m_type
         if f_info: 
             try: m_data['file_id']=f_info.file_id; m_data['file_unique_id']=f_info.file_unique_id; m_data['file_name']=getattr(f_info,'file_name',None); 
             except Exception:pass
-        if m_data['type'] != 'unknown': dm.add_message(chat_id, m_data)
+        
+        if m_data['type'] != 'unknown': 
+            dm.add_message(chat_id, m_data)
 
-        # --- Проверка на Вмешательство ---
-        # Реагируем только на текстовые сообщения для простоты
+        # --- 5. Проверка на ОБЫЧНОЕ Вмешательство ---
         if m_data['type'] == 'text' and m_data['content']:
             await _check_and_trigger_intervention(chat_id, context)
 
@@ -890,7 +981,7 @@ async def _try_send_intervention(chat_id: int, context: ContextTypes.DEFAULT_TYP
     """
     Внутренняя ФОНОВАЯ ЗАДАЧА: Генерирует и пытается отправить
     комментарий-вмешательство в чат, используя контекст последних N сообщений
-    и информацию об авторах.
+    и информацию об авторах. При успехе обновляет chat_data для отслеживания цепочки.
     """
     if not context.bot:
         logger.error(f"Intervention task c={chat_id}: Bot object not found in context.")
@@ -900,7 +991,7 @@ async def _try_send_intervention(chat_id: int, context: ContextTypes.DEFAULT_TYP
 
     try:
         # 1. Получаем настройки
-        settings = dm.get_chat_settings(chat_id)
+        settings = dm.get_chat_settings(chat_id) # Получаем все настройки один раз
         if not settings.get('allow_interventions', False):
             logger.debug(f"{log_prefix} Interventions disabled during processing.")
             return
@@ -912,36 +1003,34 @@ async def _try_send_intervention(chat_id: int, context: ContextTypes.DEFAULT_TYP
         last_n_messages = []
         try:
             limit_msgs = INTERVENTION_PROMPT_MESSAGE_COUNT
+            # Получаем сообщения, включая разные типы, чтобы корректно извлечь username
             last_n_messages = dm.get_messages_for_chat_last_n(
                 chat_id,
                 limit=limit_msgs,
-                only_text=False # Нам нужны имена, берем все сообщения
+                only_text=False # Нам нужны имена и типы для формирования context_log_entries
             )
             logger.debug(f"{log_prefix} Fetched last {len(last_n_messages)} messages (limit: {limit_msgs}).")
-            if last_n_messages:
-                logger.debug(f"{log_prefix} Last 5 message records for context: {last_n_messages[-5:]}")
-            else:
-                logger.debug(f"{log_prefix} No recent messages found.")
-                return # Нечего анализировать
+            if not last_n_messages:
+                logger.debug(f"{log_prefix} No recent messages found for intervention context.")
+                return 
         except Exception as db_err:
             logger.error(f"{log_prefix} Failed to fetch last N messages: {db_err}", exc_info=True)
             return
 
         # 3. Формирование КОНТЕКСТА С ИМЕНАМИ для промпта
-        context_log_entries = [] # Список строк "Имя: Текст" или описаний
+        context_log_entries = [] 
         if last_n_messages:
             logger.debug(f"{log_prefix} Filtering {len(last_n_messages)} records for prompt context log...")
             try:
                 for m in last_n_messages:
-                    if not isinstance(m, dict): continue # Пропускаем некорректные записи
+                    if not isinstance(m, dict): continue 
 
-                    username = m.get('username', 'Неизвестный') # Получаем имя
+                    username = m.get('username', 'Неизвестный') 
                     msg_type = m.get('type')
                     content = m.get('content', '')
 
                     log_line = ""
                     if msg_type == 'text' and content:
-                        # Ограничиваем длину текста для промпта
                         text_preview = content[:100].strip() + ('...' if len(content) > 100 else '')
                         log_line = f"{username}: {text_preview}"
                     elif msg_type == 'photo':
@@ -950,73 +1039,86 @@ async def _try_send_intervention(chat_id: int, context: ContextTypes.DEFAULT_TYP
                     elif msg_type == 'sticker':
                          emoji = f" ({content})" if content else ""
                          log_line = f"{username}: [отправил(а) стикер]{emoji}"
-                    # Можно добавить другие типы по аналогии, если считаете важным для контекста вмешательств
+                    # Добавьте другие типы по необходимости для более богатого контекста
                     # else:
                     #     log_line = f"{username}: [отправил(а) сообщение типа {msg_type}]"
-
                     if log_line:
                         context_log_entries.append(log_line)
-                        # logger.debug(f"{log_prefix} Added log entry: '{log_line}'") # Можно раскомментировать для детального лога
-
                 logger.info(f"{log_prefix} Created {len(context_log_entries)} log entries for prompt.")
             except Exception as filter_err:
-                logger.error(f"{log_prefix} Error during message filtering loop for context log: {filter_err}", exc_info=True)
-                return # Ошибка при подготовке контекста
+                logger.error(f"{log_prefix} Error during message filtering for context log: {filter_err}", exc_info=True)
+                return 
 
-        # Лог для проверки передаваемого списка
-        logger.debug(f"{log_prefix} -----> context_log_entries list BEFORE prompt build: {context_log_entries}")
+        logger.debug(f"{log_prefix} -----> context_log_entries list BEFORE prompt build (sample): {context_log_entries[:5]}")
 
         if not context_log_entries:
-            logger.debug(f"{log_prefix} context_log_entries list is empty after filtering, skipping prompt generation.")
+            logger.debug(f"{log_prefix} context_log_entries list is empty after filtering, skipping intervention.")
             return
 
-        # 4. Построение промпта (теперь передаем список строк с именами)
+        # 4. Построение промпта
         intervention_prompt_string = None
         try:
             intervention_prompt_string = pb.build_intervention_prompt(context_log_entries, personality)
-            if intervention_prompt_string:
-                 logger.debug(f"{log_prefix} Intervention prompt built (length: {len(intervention_prompt_string)}).")
-            else:
-                 logger.warning(f"{log_prefix} Prompt builder returned None/empty string.")
+            if not intervention_prompt_string:
+                 logger.warning(f"{log_prefix} Prompt builder returned None/empty string for intervention.")
                  return
+            logger.debug(f"{log_prefix} Intervention prompt built (length: {len(intervention_prompt_string)}).")
         except Exception as build_err:
             logger.error(f"{log_prefix} Error building intervention prompt: {build_err}", exc_info=True)
             return
 
-        if not intervention_prompt_string:
-             logger.error(f"{log_prefix} Intervention prompt is unexpectedly empty after build attempt.")
-             return
+        logger.debug(f"{log_prefix} Generated prompt sample for intervention: {intervention_prompt_string[:200]}...")
 
-        logger.debug(f"{log_prefix} Generated prompt sample: {intervention_prompt_string[:200]}...")
-
-        # 5. Вызов Gemini (используем safe_generate_intervention, который теперь принимает строку промпта)
+        # 5. Вызов Gemini
+        # Используем safe_generate_intervention, который принимает строку промпта
         intervention_text = await gc.safe_generate_intervention(intervention_prompt_string, lang)
 
-        # 6. Обработка ответа и отправка (без изменений)
+        # 6. Обработка ответа и отправка
         if intervention_text:
-            inter_settings_recheck = dm.get_intervention_settings(chat_id)
-            now_ts = int(time.time())
-            last_ts = inter_settings_recheck.get('last_intervention_ts', 0)
+            # Повторно проверяем кулдаун на случай, если генерация была долгой
+            # Используем свежие настройки вмешательств, т.к. они могли измениться
+            inter_settings_recheck = dm.get_intervention_settings(chat_id) 
+            # И проверяем, что вмешательства все еще разрешены
+            if not inter_settings_recheck.get('allow_interventions', False):
+                logger.info(f"{log_prefix} Interventions were disabled while AI was generating. Skipped sending.")
+                return
+
+            now_ts_for_send = int(time.time())
+            last_ts_from_db = inter_settings_recheck.get('last_intervention_ts', 0)
             cd_minutes = inter_settings_recheck.get('cooldown_minutes', INTERVENTION_DEFAULT_COOLDOWN_MIN)
             cd_sec = cd_minutes * 60
 
-            if now_ts >= last_ts + cd_sec:
-                logger.info(f"{log_prefix} Sending '{intervention_text[:50]}...' (Personality: {personality})")
+            if now_ts_for_send >= last_ts_from_db + cd_sec:
+                logger.info(f"{log_prefix} Sending intervention '{intervention_text[:50]}...' (Personality: {personality})")
                 try:
-                    await context.bot.send_message(chat_id=chat_id, text=intervention_text)
-                    dm.update_chat_setting(chat_id, 'last_intervention_ts', now_ts)
-                    logger.info(f"{log_prefix} Timestamp updated to {now_ts}")
+                    sent_intervention_msg = await context.bot.send_message(chat_id=chat_id, text=intervention_text)
+                    # Обновляем время последнего *успешного* вмешательства
+                    dm.update_chat_setting(chat_id, 'last_intervention_ts', now_ts_for_send)
+                    logger.info(f"{log_prefix} Last intervention timestamp updated to {now_ts_for_send} in DB.")
+                    
+                    # Сохраняем ID этого вмешательства как начало/продолжение активной цепочки
+                    # Это сообщение, на которое пользователь может ответить, и бот продолжит диалог.
+                    if context.chat_data is not None:
+                        context.chat_data[ACTIVE_INTERVENTION_CHAIN_MESSAGE_ID_KEY] = sent_intervention_msg.message_id
+                        logger.info(f"{log_prefix} Set active intervention chain message_id to {sent_intervention_msg.message_id} in chat_data.")
+                    else:
+                        # Это маловероятно, но лучше проверить
+                        logger.warning(f"{log_prefix} context.chat_data is None. Cannot set active intervention chain message_id.")
+
                 except TelegramError as send_err:
                      logger.error(f"{log_prefix} Failed to send intervention message: {send_err}")
+                     # Здесь не сбрасываем ACTIVE_INTERVENTION_CHAIN_MESSAGE_ID_KEY, т.к. сообщение не было отправлено
                 except Exception as send_generic_err:
                      logger.error(f"{log_prefix} Unexpected error sending intervention message: {send_generic_err}", exc_info=True)
             else:
-                logger.info(f"{log_prefix} Cooldown activated during generation ({now_ts} < {last_ts + cd_sec}), skipped sending.")
+                # Кулдаун активировался во время генерации, или настройки изменились так, что кулдаун еще не прошел
+                logger.info(f"{log_prefix} Cooldown became active during AI generation or settings changed. Cooldown ends at {last_ts_from_db + cd_sec} (current: {now_ts_for_send}). Skipped sending intervention.")
         else:
-            logger.debug(f"{log_prefix} No intervention text generated by AI.")
+            logger.debug(f"{log_prefix} No intervention text generated by AI (or AI indicated no reply needed).")
 
     except Exception as e:
-        logger.error(f"CRITICAL Error in intervention task main try block for chat c={chat_id}: {e}", exc_info=True)
+        # Это ловит ошибки, не пойманные внутри блоков try/except (например, критические ошибки в dm)
+        logger.error(f"CRITICAL Error in intervention task main try-block for chat c={chat_id}: {e}", exc_info=True)
 
 
 # ==================
@@ -1275,8 +1377,6 @@ async def _display_settings_retention(update: Update, context: ContextTypes.DEFA
     text = get_text("settings_select_retention_title", chat_lang) # Используем обновленный заголовок
     btns = []
 
-    # --- ИЗМЕНЕНО: Список опций для кнопок ---
-    # Убраны 0 (Вечно) и 365, добавлены 7 и 14
     options_days = [7, 14, 30, 90, 180]
     # -------------------------------------------
 
@@ -1292,117 +1392,243 @@ async def _display_settings_retention(update: Update, context: ContextTypes.DEFA
     btns.append([InlineKeyboardButton(get_text("button_back", chat_lang), callback_data="settings_main")])
     await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(btns), parse_mode=ParseMode.HTML)
 
-# --- ПОДМЕНЮ НАСТРОЕК ВМЕШАТЕЛЬСТВ ---
 async def _display_settings_interventions(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
     """
     Отображает улучшенное подменю настроек Вмешательств Летописца.
-    Использует новые диапазоны и опции для кнопок.
+    Для владельца добавляет опции ручного ввода значений.
     """
     query = update.callback_query
-    if not query:
-        logger.warning("_display_settings_interventions called without a query.")
+    # target_message_id_for_edit используется для определения, какое сообщение редактировать.
+    # Оно может прийти из query.message.message_id или из user_data (после ручного ввода).
+    target_message_id_for_edit = None
+    if query and query.message:
+        target_message_id_for_edit = query.message.message_id
+    elif PENDING_INTERVENTION_INPUT_KEY in context.user_data and \
+         context.user_data[PENDING_INTERVENTION_INPUT_KEY].get('menu_message_id') and \
+         context.user_data[PENDING_INTERVENTION_INPUT_KEY].get('chat_id_for_menu') == chat_id:
+        target_message_id_for_edit = context.user_data[PENDING_INTERVENTION_INPUT_KEY]['menu_message_id']
+        # Этот ключ будет очищен в _handle_intervention_setting_input после успешного сохранения.
+
+    if not target_message_id_for_edit and not update.message:
+        logger.error(f"Cannot display intervention settings for chat {chat_id}: no target message_id and no originating command message.")
+        if query: await query.answer("Ошибка отображения меню.", show_alert=True)
         return
 
     chat_lang = await get_chat_lang(chat_id)
     inter_settings = dm.get_intervention_settings(chat_id)
-    current_cooldown = inter_settings.get('cooldown_minutes', INTERVENTION_DEFAULT_COOLDOWN_MIN)
-    current_min_msgs = inter_settings.get('min_msgs', INTERVENTION_DEFAULT_MIN_MSGS)
-    current_timespan = inter_settings.get('timespan_minutes', INTERVENTION_DEFAULT_TIMESPAN_MIN)
+    current_cooldown = inter_settings['cooldown_minutes']
+    current_min_msgs = inter_settings['min_msgs']
+    current_timespan = inter_settings['timespan_minutes']
 
-    # --- Формирование текста сообщения (используем обновленные ключи локализации) ---
+    is_owner = (user_id == BOT_OWNER_ID)
+
     text = f"<b>{get_text('settings_interventions_title', chat_lang)}</b>\n"
     text += f"<i>{get_text('settings_interventions_description', chat_lang)}</i>\n\n"
 
-    # 1. Настройка Интервала (Cooldown)
-    # Передаем актуальные лимиты/дефолты в форматирование
     limits_cd = {'min_val': INTERVENTION_MIN_COOLDOWN_MIN, 'max_val': INTERVENTION_MAX_COOLDOWN_MIN, 'def_val': INTERVENTION_DEFAULT_COOLDOWN_MIN}
-    text += f"▪️ <b>{get_text('settings_intervention_cooldown_label', chat_lang)}:</b> Пауза между комментариями.\n"
+    text += f"▪️ <b>{get_text('settings_intervention_cooldown_label', chat_lang)}:</b>\n"
     text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_cooldown, **limits_cd)}\n\n"
 
-    # 2. Настройка Мин. Сообщений
     limits_mm = {'min_val': INTERVENTION_MIN_MIN_MSGS, 'max_val': INTERVENTION_MAX_MIN_MSGS, 'def_val': INTERVENTION_DEFAULT_MIN_MSGS}
-    text += f"▪️ <b>{get_text('settings_intervention_min_msgs_label', chat_lang)}:</b> Сколько сообщений должно появиться в 'Окне активности', чтобы бот мог среагировать.\n"
+    text += f"▪️ <b>{get_text('settings_intervention_min_msgs_label', chat_lang)}:</b>\n"
     text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_min_msgs, **limits_mm)}\n\n"
 
-    # 3. Настройка Окна Активности (Timespan)
     limits_ts = {'min_val': INTERVENTION_MIN_TIMESPAN_MIN, 'max_val': INTERVENTION_MAX_TIMESPAN_MIN, 'def_val': INTERVENTION_DEFAULT_TIMESPAN_MIN}
-    text += f"▪️ <b>{get_text('settings_intervention_timespan_label', chat_lang)}:</b> Период времени, за который считаются 'Мин. сообщения'.\n"
+    text += f"▪️ <b>{get_text('settings_intervention_timespan_label', chat_lang)}:</b>\n"
     text += f"   {get_text('settings_intervention_current_value', chat_lang, value=current_timespan, **limits_ts)}\n\n"
 
     text += f"<i>{get_text('settings_interventions_change_hint', chat_lang)}</i>"
 
-    is_owner = (user_id == BOT_OWNER_ID)
     if is_owner:
-        text += get_text("settings_intervention_owner_note", chat_lang) # Примечание для владельца
+        text += get_text("settings_intervention_owner_note", chat_lang)
+        text += f"\n<i>{get_text('settings_intervention_manual_input_hint', chat_lang)}</i>"
 
-    # --- Формирование кнопок ---
     button_rows = []
+    # Кнопка Вкл/Выкл вмешательств
+    interventions_currently_enabled = dm.get_chat_settings(chat_id).get('allow_interventions', False)
+    toggle_button_text_key = "settings_button_toggle_interventions_on" if interventions_currently_enabled else "settings_button_toggle_interventions_off"
+    button_rows.append([InlineKeyboardButton(get_text(toggle_button_text_key, chat_lang), callback_data="settings_toggle_interventions")])
 
-    # 1. Кнопка "Запретить вмешательства"
-    disable_text = get_text("settings_button_toggle_interventions_on", chat_lang)
-    button_rows.append([InlineKeyboardButton(disable_text, callback_data="settings_toggle_interventions")])
-
-    # 2. Кнопки Интервала (Cooldown) - НОВЫЕ ОПЦИИ
-    standard_cd_options = [60, 120, 240, 480]   # Стандарт: 1ч, 2ч, 4ч, 8ч
-    frequent_cd_options = [15, 30]              # Владелец: 15м, 30м
-    all_cd_options = standard_cd_options
+    # Cooldown
+    cd_options = [60, 120, 240, 480]
+    if is_owner: cd_options = [15, 30] + cd_options; cd_options.sort()
+    cd_btns_row = []
+    for cd_val in cd_options:
+        if INTERVENTION_MIN_COOLDOWN_MIN <= cd_val <= INTERVENTION_MAX_COOLDOWN_MIN:
+            cd_btns_row.append(InlineKeyboardButton(
+                f"{'✅ ' if cd_val == current_cooldown else ''}{get_text('settings_intervention_btn_cooldown', chat_lang, minutes=cd_val)}",
+                callback_data=f"settings_set_cooldown_{cd_val}"
+            ))
     if is_owner:
-        all_cd_options = frequent_cd_options + standard_cd_options
-        all_cd_options.sort()
+        cd_btns_row.append(InlineKeyboardButton(get_text("settings_intervention_manual_button", chat_lang), callback_data="settings_manual_cooldown"))
+    if cd_btns_row: button_rows.append(cd_btns_row) # Могут быть 2 ряда, если много опций; для простоты в один
 
-    cd_btns_row1 = []
-    cd_btns_row2 = []
-    for cd in all_cd_options:
-        prefix = "✅ " if cd == current_cooldown else ""
-        text_val = get_text("settings_intervention_btn_cooldown", chat_lang, minutes=cd)
-        # Используем актуальные лимиты для проверки
-        if INTERVENTION_MIN_COOLDOWN_MIN <= cd <= INTERVENTION_MAX_COOLDOWN_MIN:
-            btn = InlineKeyboardButton(f"{prefix}{text_val}", callback_data=f"settings_set_cooldown_{cd}")
-            if len(cd_btns_row1) < 4: # Попробуем по 4 кнопки в ряд
-                 cd_btns_row1.append(btn)
-            elif len(cd_btns_row2) < 4:
-                 cd_btns_row2.append(btn)
-    if cd_btns_row1: button_rows.append(cd_btns_row1)
-    if cd_btns_row2: button_rows.append(cd_btns_row2)
-
-    # 3. Кнопки Мин. Сообщений - НОВЫЕ ОПЦИИ
-    standard_mm_options = [5, 10, 15, 25] # Стандарт
-    frequent_mm_options = [3]            # Владелец
-    all_mm_options = standard_mm_options
+    # Min Msgs
+    mm_options = [5, 10, 15, 25]
+    if is_owner: mm_options = [3] + mm_options; mm_options.sort()
+    mm_btns_row = []
+    for mm_val in mm_options:
+        if INTERVENTION_MIN_MIN_MSGS <= mm_val <= INTERVENTION_MAX_MIN_MSGS:
+            mm_btns_row.append(InlineKeyboardButton(
+                f"{'✅ ' if mm_val == current_min_msgs else ''}{get_text('settings_intervention_btn_msgs', chat_lang, count=mm_val)}",
+                callback_data=f"settings_set_minmsgs_{mm_val}"
+            ))
     if is_owner:
-        all_mm_options = frequent_mm_options + standard_mm_options
-        all_mm_options.sort()
+        mm_btns_row.append(InlineKeyboardButton(get_text("settings_intervention_manual_button", chat_lang), callback_data="settings_manual_minmsgs"))
+    if mm_btns_row: button_rows.append(mm_btns_row)
 
-    mm_btns = []
-    for mm in all_mm_options:
-        prefix = "✅ " if mm == current_min_msgs else ""
-        # Используем актуальные лимиты
-        if INTERVENTION_MIN_MIN_MSGS <= mm <= INTERVENTION_MAX_MIN_MSGS:
-            text_val = get_text("settings_intervention_btn_msgs", chat_lang, count=mm)
-            mm_btns.append(InlineKeyboardButton(f"{prefix}{text_val}", callback_data=f"settings_set_minmsgs_{mm}"))
-    if mm_btns: button_rows.append(mm_btns) # В один ряд
-
-    # 4. Кнопки Окна Активности (Timespan) - БЕЗ ИЗМЕНЕНИЙ
+    # Timespan
     ts_options = [5, 10, 15, 30, 60]
-    ts_btns = []
-    for ts in ts_options:
-        prefix = "✅ " if ts == current_timespan else ""
-        if INTERVENTION_MIN_TIMESPAN_MIN <= ts <= INTERVENTION_MAX_TIMESPAN_MIN:
-            text_val = get_text("settings_intervention_btn_timespan", chat_lang, minutes=ts)
-            ts_btns.append(InlineKeyboardButton(f"{prefix}{text_val}", callback_data=f"settings_set_timespan_{ts}"))
-    if ts_btns: button_rows.append(ts_btns) # В один ряд
+    ts_btns_row = []
+    for ts_val in ts_options:
+        if INTERVENTION_MIN_TIMESPAN_MIN <= ts_val <= INTERVENTION_MAX_TIMESPAN_MIN:
+            ts_btns_row.append(InlineKeyboardButton(
+                f"{'✅ ' if ts_val == current_timespan else ''}{get_text('settings_intervention_btn_timespan', chat_lang, minutes=ts_val)}",
+                callback_data=f"settings_set_timespan_{ts_val}"
+            ))
+    if is_owner:
+        ts_btns_row.append(InlineKeyboardButton(get_text("settings_intervention_manual_button", chat_lang), callback_data="settings_manual_timespan"))
+    if ts_btns_row: button_rows.append(ts_btns_row)
 
-    # 5. Кнопка "Назад"
     button_rows.append([InlineKeyboardButton(get_text("button_back", chat_lang), callback_data="settings_main")])
+    keyboard_markup = InlineKeyboardMarkup(button_rows)
 
-    # Редактируем сообщение
+    if target_message_id_for_edit:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=target_message_id_for_edit,
+                text=text, reply_markup=keyboard_markup, parse_mode=ParseMode.HTML
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e): logger.error(f"Failed intervention settings edit (msg_id {target_message_id_for_edit}): {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error editing intervention settings (msg_id {target_message_id_for_edit}): {e}", exc_info=True)
+    elif update.message and query is None: # Если вызвано командой /story_settings -> settings_show_interventions (маловероятно)
+        try:
+            sent_msg = await update.message.reply_html(text=text, reply_markup=keyboard_markup)
+            logger.info(f"Sent new intervention settings menu to chat {chat_id} with msg_id {sent_msg.message_id} (unexpected flow).")
+        except Exception as e:
+             logger.error(f"Error sending new intervention settings message for chat {chat_id}: {e}", exc_info=True)
+    else:
+        # Ситуация, когда не можем ни отредактировать, ни отправить новое.
+        logger.error(f"Cannot display intervention settings for chat {chat_id}: No message to edit or reply to.")
+        if query: await query.answer("Ошибка отображения меню.", show_alert=True)
+        
+        
+        
+        
+async def _handle_intervention_setting_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int, user_id: int, 
+    setting_key_to_set: str, menu_message_id_to_update: int, 
+    user_message: Message 
+):
+    """Обрабатывает ручной ввод числового значения для настройки вмешательства от владельца."""
+    logger.debug(f"Owner {user_id} (chat {chat_id}) entered value for intervention setting '{setting_key_to_set}': '{user_message.text}' for menu_msg_id {menu_message_id_to_update}")
+    
+    menu_chat_id = context.user_data.get(PENDING_INTERVENTION_INPUT_KEY, {}).get('chat_id_for_menu', chat_id)
+    chat_lang = await get_chat_lang(menu_chat_id)
+    pending_details_backup = context.user_data.pop(PENDING_INTERVENTION_INPUT_KEY, None)
+
+    raw_value_str = user_message.text.strip()
+    value_int: int
+
     try:
-        await query.edit_message_text(
-            text=text,
-            reply_markup=InlineKeyboardMarkup(button_rows),
-            parse_mode=ParseMode.HTML
-        )
-    except BadRequest as e:
-        if "Message is not modified" not in str(e): logger.error(f"Failed intervention settings edit: {e}")
-    except Exception as e:
-         logger.error(f"Unexpected error editing intervention settings: {e}", exc_info=True)
+        value_int = int(raw_value_str)
+    except ValueError:
+        await user_message.reply_html(get_text("error_intervention_manual_not_number", chat_lang))
+        try: await user_message.delete()
+        except Exception: pass
+        return
+    
+    corrected_value = value_int
+    value_is_valid_for_parameter = True
+
+    if setting_key_to_set in ['intervention_cooldown_minutes', 'intervention_min_msgs', 'intervention_timespan_minutes']:
+        if value_int <= 0: # Эти параметры должны быть положительными
+            value_is_valid_for_parameter = False
+            await user_message.reply_html(get_text("error_intervention_manual_positive_only", chat_lang, setting_name=get_text(f"setting_name_{setting_key_to_set.split('_')[1]}", chat_lang))) # Нужны новые строки локализации
+            try: await user_message.delete()
+            except Exception: pass
+            return # Не сохраняем, если не положительное
+
+    if not value_is_valid_for_parameter: # Если проверка выше не прошла
+        return
+
+    success = dm.update_chat_setting(menu_chat_id, setting_key_to_set, corrected_value)
+
+    if success:
+        # Сообщение об успехе без упоминания коррекции по min/max
+        await user_message.reply_html(get_text("settings_intervention_manual_set_owner", chat_lang, value=corrected_value))
+        
+        if pending_details_backup: 
+            context.user_data[PENDING_INTERVENTION_INPUT_KEY] = pending_details_backup
+        
+        await _display_settings_interventions(update, context, menu_chat_id, user_id) 
+        
+        if pending_details_backup: 
+             context.user_data.pop(PENDING_INTERVENTION_INPUT_KEY, None)
+    else:
+        await user_message.reply_html(get_text("error_db_generic", chat_lang))
+
+    try: await user_message.delete()
+    except Exception: pass
+
+
+# НОВАЯ ФУНКЦИЯ _handle_reply_to_intervention_chain
+async def _handle_reply_to_intervention_chain(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    bot_message_replied_to: Message, 
+    user_reply_message: Message      
+):
+    chat_lang, _ = await get_chat_info(chat_id, context)
+    settings = dm.get_chat_settings(chat_id)
+    personality_key = settings.get('story_personality', DEFAULT_PERSONALITY)
+
+    logger.info(f"Chat {chat_id}: User {user_reply_message.from_user.id} replied to intervention chain message {bot_message_replied_to.message_id}. Bot personality: {personality_key}.")
+    
+    if not user_reply_message.text:
+        logger.debug(f"Chat {chat_id}: User reply is not text, not generating bot response in chain.")
+        # Не сбрасываем активную цепочку, если ответ не текст, вдруг следующее сообщение будет текстом
+        return
+
+    try: await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    except Exception: pass
+
+    original_bot_text = bot_message_replied_to.text or "" # Вмешательства обычно текстовые
+    user_reply_text = user_reply_message.text
+
+    reply_prompt_string = pb.build_reply_to_intervention_prompt(
+        original_bot_text=original_bot_text,
+        user_reply_text=user_reply_text,
+        personality_key=personality_key,
+        # chat_history_for_context=chat_history_for_reply_context # Если решим использовать
+    )
+
+    if not reply_prompt_string:
+        logger.warning(f"Chat {chat_id}: Failed to build prompt for intervention reply.")
+        return
+
+    bot_response_text = await gc.safe_generate_reply_to_intervention(
+        reply_prompt_string, lang=chat_lang
+    )
+
+    if bot_response_text:
+        try:
+            sent_bot_reply_msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=bot_response_text,
+                reply_to_message_id=user_reply_message.message_id
+            )
+            # Обновляем ID "активного вмешательства" на ID нового сообщения бота
+            context.chat_data[ACTIVE_INTERVENTION_CHAIN_MESSAGE_ID_KEY] = sent_bot_reply_msg.message_id
+            logger.info(f"Chat {chat_id}: Bot replied in intervention chain (msg_id {sent_bot_reply_msg.message_id}) to user {user_reply_message.from_user.id}.")
+        except TelegramError as e:
+            logger.error(f"Chat {chat_id}: Failed to send bot's reply in intervention chain: {e}")
+            context.chat_data.pop(ACTIVE_INTERVENTION_CHAIN_MESSAGE_ID_KEY, None) # Сброс при ошибке
+        except Exception as e:
+            logger.exception(f"Chat {chat_id}: Unexpected error sending bot's reply: {e}")
+            context.chat_data.pop(ACTIVE_INTERVENTION_CHAIN_MESSAGE_ID_KEY, None) # Сброс при ошибке
+    else:
+        logger.info(f"Chat {chat_id}: Gemini did not generate a response for intervention reply. Chain might be broken.")
