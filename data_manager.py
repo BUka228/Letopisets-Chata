@@ -285,110 +285,79 @@ def get_chat_settings(chat_id: int) -> Dict[str, Any]:
 # --- update_chat_setting (без изменений) ---
 def update_chat_setting(chat_id: int, setting_key: str, setting_value: Optional[Union[str, bool, int]]) -> bool:
     """
-    Обновляет одну настройку чата с валидацией и коррекцией для числовых параметров.
+    Обновляет одну настройку чата. Валидация специфичная для параметров (кроме базовых типов)
+    теперь в основном лежит на вызывающем коде (bot_handlers.py).
     Возвращает True при успехе, False при ошибке.
     """
     allowed_keys = [
         'lang', 'enabled', 'custom_schedule_time', 'timezone', 'story_genre',
         'retention_days', 'output_format', 'story_personality', 'allow_interventions',
-        'last_intervention_ts', # Обычно не меняется пользователем, но может через код
+        'last_intervention_ts', 
         'intervention_cooldown_minutes', 'intervention_min_msgs', 'intervention_timespan_minutes'
     ]
     if setting_key not in allowed_keys:
         logger.error(f"Попытка обновить неверный ключ настройки '{setting_key}' для чата {chat_id}")
         return False
 
-    value_to_save: Optional[Union[str, int]] = None # Значение для сохранения в БД (TEXT или INTEGER)
-    was_corrected = False # Флаг, показывающий, было ли значение скорректировано
-
-    # --- Блок Валидации и Коррекции Значений ---
+    value_to_save: Optional[Union[str, int]] = None 
+    
+    # --- Блок Валидации Базовых Типов и Форматов ---
     try:
         if setting_key == 'lang':
             if not isinstance(setting_value, str) or setting_value not in SUPPORTED_LANGUAGES:
                 raise ValueError(f"Недопустимый язык: {setting_value}")
             value_to_save = setting_value
-
         elif setting_key in ['enabled', 'allow_interventions']:
-            # Преобразуем любое значение в 1 или 0 для SQLite BOOLEAN
             value_to_save = 1 if bool(setting_value) else 0
-
         elif setting_key == 'custom_schedule_time':
-            if setting_value is None:
-                value_to_save = None
+            if setting_value is None: value_to_save = None
             elif isinstance(setting_value, str) and re.fullmatch(r"^(?:[01]\d|2[0-3]):[0-5]\d$", setting_value):
                 value_to_save = setting_value
-            else:
-                raise ValueError(f"Неверный формат времени HH:MM: {setting_value}")
-
+            else: raise ValueError(f"Неверный формат времени HH:MM: {setting_value}")
         elif setting_key == 'timezone':
-            if not isinstance(setting_value, str):
-                raise ValueError(f"Таймзона должна быть строкой: {setting_value}")
-            try:
-                pytz.timezone(setting_value) # Проверка существования
-                value_to_save = setting_value
-            except pytz.exceptions.UnknownTimeZoneError:
-                raise ValueError(f"Неизвестная таймзона: {setting_value}")
-
+            if not isinstance(setting_value, str): raise ValueError(f"Таймзона должна быть строкой: {setting_value}")
+            try: pytz.timezone(setting_value); value_to_save = setting_value
+            except pytz.exceptions.UnknownTimeZoneError: raise ValueError(f"Неизвестная таймзона: {setting_value}")
         elif setting_key == 'story_genre':
             if not isinstance(setting_value, str) or setting_value not in SUPPORTED_GENRES:
                 raise ValueError(f"Недопустимый жанр: {setting_value}")
             value_to_save = setting_value
-
         elif setting_key == 'output_format':
              if not isinstance(setting_value, str) or setting_value not in SUPPORTED_OUTPUT_FORMATS:
                  raise ValueError(f"Недопустимый формат вывода: {setting_value}")
              value_to_save = setting_value
-
         elif setting_key == 'story_personality':
              if not isinstance(setting_value, str) or setting_value not in SUPPORTED_PERSONALITIES:
                  raise ValueError(f"Недопустимая личность: {setting_value}")
              value_to_save = setting_value
-
         elif setting_key == 'retention_days':
-             if setting_value is None: # Разрешаем сброс на NULL
-                 value_to_save = None
+             if setting_value is None: value_to_save = None
              elif isinstance(setting_value, int) and setting_value >= 0:
-                 value_to_save = None if setting_value == 0 else setting_value # 0 означает вечно (NULL)
-             else:
-                 raise ValueError("Срок хранения должен быть целым неотрицательным числом (0 = вечно)")
-
-        elif setting_key == 'last_intervention_ts':
-             if isinstance(setting_value, int) and setting_value >= 0:
-                 value_to_save = setting_value
-             else:
-                 raise ValueError("Timestamp должен быть целым неотрицательным числом")
-
-        # Настройки Вмешательств с коррекцией в пределах MIN/MAX
-        elif setting_key == 'intervention_cooldown_minutes':
-            if setting_value is None: value_to_save = None
+                 value_to_save = None if setting_value == 0 else setting_value 
+             else: raise ValueError("Срок хранения должен быть целым неотрицательным числом (0 = вечно)")
+        
+        # Для числовых настроек вмешательств и last_intervention_ts - просто проверяем тип
+        # Сама коррекция (если нужна для кнопок) и валидация (для ручного ввода владельца)
+        # теперь полностью в bot_handlers.py
+        elif setting_key in ['last_intervention_ts', 'intervention_cooldown_minutes', 'intervention_min_msgs', 'intervention_timespan_minutes']:
+            if setting_value is None: # Разрешаем NULL для настроек вмешательств (будут использоваться дефолты из config)
+                value_to_save = None
             elif isinstance(setting_value, int):
-                corrected = max(INTERVENTION_MIN_COOLDOWN_MIN, min(setting_value, INTERVENTION_MAX_COOLDOWN_MIN))
-                if corrected != setting_value: was_corrected = True
-                value_to_save = corrected # Сохраняем скорректированное значение
-            else: raise ValueError("Cooldown должен быть целым числом (в минутах) или None")
+                # Проверка на > 0 для этих параметров уже сделана в _handle_intervention_setting_input
+                # Для кнопочного ввода значения всегда корректны.
+                value_to_save = setting_value
+            else:
+                raise ValueError(f"Значение для '{setting_key}' должно быть целым числом или None")
+        else:
+            # Эта ветка не должна достигаться из-за allowed_keys, но на всякий случай
+            logger.error(f"Необработанный ключ настройки '{setting_key}' в data_manager.update_chat_setting")
+            return False
 
-        elif setting_key == 'intervention_min_msgs':
-            if setting_value is None: value_to_save = None
-            elif isinstance(setting_value, int):
-                corrected = max(INTERVENTION_MIN_MIN_MSGS, min(setting_value, INTERVENTION_MAX_MIN_MSGS))
-                if corrected != setting_value: was_corrected = True
-                value_to_save = corrected # Сохраняем скорректированное значение
-            else: raise ValueError("Мин. сообщений должно быть целым числом или None")
-
-        elif setting_key == 'intervention_timespan_minutes':
-            if setting_value is None: value_to_save = None
-            elif isinstance(setting_value, int):
-                corrected = max(INTERVENTION_MIN_TIMESPAN_MIN, min(setting_value, INTERVENTION_MAX_TIMESPAN_MIN))
-                if corrected != setting_value: was_corrected = True
-                value_to_save = corrected # Сохраняем скорректированное значение
-            else: raise ValueError("Окно активности должно быть целым числом (в минутах) или None")
-
-    except Exception as validation_e:
-        logger.error(f"Ошибка валидации: ключ='{setting_key}', значение='{setting_value}', чат={chat_id}: {validation_e}")
-        return False # Ошибка валидации - не сохраняем
+    except ValueError as validation_e: # Ловим только ValueError от проверок выше
+        logger.error(f"Ошибка валидации значения в data_manager: ключ='{setting_key}', значение='{setting_value}', чат={chat_id}: {validation_e}")
+        return False
 
     # --- Блок Сохранения в БД ---
-    # Используем UPSERT (INSERT или UPDATE)
     sql = f"""
         INSERT INTO chat_settings (chat_id, {setting_key}) VALUES (?, ?)
         ON CONFLICT(chat_id) DO UPDATE SET {setting_key} = excluded.{setting_key}
@@ -397,26 +366,20 @@ def update_chat_setting(chat_id: int, setting_key: str, setting_value: Optional[
 
     try:
         _execute_query(sql, params)
-        log_suffix = " (скорректировано)" if was_corrected else ""
-        logger.info(f"Настройка '{setting_key}' для чата={chat_id} обновлена на '{value_to_save}'{log_suffix}.")
+        # Флаг 'was_corrected' больше здесь не актуален, т.к. data_manager не должен корректировать.
+        # Логгер в bot_handlers сообщит о коррекции, если она была там.
+        logger.info(f"Настройка '{setting_key}' для чата={chat_id} обновлена на '{value_to_save}'.")
 
-        # Обновляем кэш языка, если изменился язык
         if setting_key == 'lang' and isinstance(value_to_save, str):
             try:
                 from localization import update_chat_lang_cache
                 update_chat_lang_cache(chat_id, value_to_save)
-            except ImportError:
-                logger.error("Не удалось импортировать localization для обновления кэша языка.")
-            except Exception as cache_e:
-                logger.error(f"Ошибка при обновлении кэша языка для чата {chat_id}: {cache_e}")
-
-        # Не возвращаем was_corrected напрямую, бот узнает об этом через алерт в UI
-        return True # Успех сохранения
-
+            except ImportError: logger.error("Не удалось импортировать localization для обновления кэша языка.")
+            except Exception as cache_e: logger.error(f"Ошибка при обновлении кэша языка для чата {chat_id}: {cache_e}")
+        return True
     except Exception:
-        # Ошибка уже залогирована в _execute_query
         logger.error(f"Не удалось сохранить настройку '{setting_key}'='{setting_value}' для чата={chat_id} в БД.")
-        return False # Ошибка сохранения
+        return False
 
 
 # --- Функции Получения Настроек (без изменений) ---
