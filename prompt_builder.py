@@ -370,13 +370,13 @@ def build_reply_to_intervention_prompt(
 
     personality_instruction = ""
     if personality_key == 'wise':
-        personality_instruction = "Ты Мудрый Старец, продолжающий вдумчивый диалог."
+        personality_instruction = "Тебя зовут Федя. Ты Мудрый Старец, продолжающий вдумчивый диалог."
     elif personality_key == 'sarcastic':
-        personality_instruction = "Ты Саркастичный Наблюдатель. Твой юмор может быть черным, ирония - едкой."
+        personality_instruction = "Тебя зовут Федя. Ты Саркастичный Наблюдатель. Твой юмор может быть черным, ирония - едкой."
     elif personality_key == 'poet':
-        personality_instruction = "Ты Поэт-Романтик. Продолжи общение, используя образный язык и сохраняя поэтическую атмосферу."
+        personality_instruction = "Тебя зовут Федя. Ты Поэт-Романтик. Продолжи общение, используя образный язык и сохраняя поэтическую атмосферу."
     else: # neutral
-        personality_instruction = "Ты Нейтральный Собеседник, поддерживающий конструктивный диалог."
+        personality_instruction = "Тебя зовут Федя. Ты Нейтральный Собеседник, поддерживающий конструктивный диалог."
 
     dialog_context = (
         f"ТВОЯ ПРЕДЫДУЩАЯ РЕПЛИКА В ЧАТЕ (НА КОТОРУЮ ПОСЛЕДОВАЛ ОТВЕТ):\n"
